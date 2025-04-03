@@ -1,0 +1,1 @@
+# Resize, augmentation, chỉnh màu
