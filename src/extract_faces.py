@@ -229,264 +229,17 @@ def extract_frames_from_video(video_path, output_folder, num_frames=100, target_
     print(f"Successfully saved {saved_count} diverse face frames from {os.path.basename(video_path)}")
     return saved_count
 
-def split_data(raw_folder, train_folder, test_folder, val_folder, train_ratio=0.7, test_ratio=0.15):
-    """
-    Chia dữ liệu vào các thư mục train, test, validation
-    
-    Args:
-        raw_folder: Thư mục chứa dữ liệu gốc
-        train_folder: Thư mục dữ liệu huấn luyện
-        test_folder: Thư mục dữ liệu kiểm thử
-        val_folder: Thư mục dữ liệu xác thực
-        train_ratio: Tỷ lệ dữ liệu huấn luyện
-        test_ratio: Tỷ lệ dữ liệu kiểm thử (val_ratio = 1 - train_ratio - test_ratio)
-    """
-    # Đảm bảo các thư mục tồn tại
-    ensure_dir(train_folder)
-    ensure_dir(test_folder)
-    ensure_dir(val_folder)
-    
-    # Lấy danh sách thư mục con trong raw_folder (mỗi thư mục là một student)
-    student_folders = [d for d in os.listdir(raw_folder) if os.path.isdir(os.path.join(raw_folder, d))]
-    
-    for student_folder in student_folders:
-        # Tạo thư mục tương ứng trong train, test, val
-        student_id = student_folder
-        
-        train_student_folder = os.path.join(train_folder, student_id)
-        test_student_folder = os.path.join(test_folder, student_id)
-        val_student_folder = os.path.join(val_folder, student_id)
-        
-        ensure_dir(train_student_folder)
-        ensure_dir(test_student_folder)
-        ensure_dir(val_student_folder)
-        
-        # Lấy danh sách hình ảnh trong thư mục raw của sinh viên
-        raw_student_folder = os.path.join(raw_folder, student_folder)
-        images = [f for f in os.listdir(raw_student_folder) if f.endswith(('.jpg', '.jpeg', '.png'))]
-        
-        # Xáo trộn danh ssách ảnh
-        random.shuffle(images)
-        
-        # Tính số lượng ảnh cho mỗi tập
-        num_images = len(images)
-        num_train = int(num_images * train_ratio)
-        num_test = int(num_images * test_ratio)
-        
-        # Chia thành các tập
-        train_images = images[:num_train]
-        test_images = images[num_train:num_train+num_test]
-        val_images = images[num_train+num_test:]
-        
-        # Sao chép ảnh vào các thư mục tương ứng
-        for img in train_images:
-            shutil.copy2(os.path.join(raw_student_folder, img), os.path.join(train_student_folder, img))
-        
-        for img in test_images:
-            shutil.copy2(os.path.join(raw_student_folder, img), os.path.join(test_student_folder, img))
-        
-        for img in val_images:
-            shutil.copy2(os.path.join(raw_student_folder, img), os.path.join(val_student_folder, img))
-        
-        print(f"Student {student_id}: {len(train_images)} training, {len(test_images)} testing, {len(val_images)} validation images")
-
-def classify_face_orientation(face_image, face_mesh):
-    """
-    Phân loại góc nhìn của khuôn mặt với ngưỡng cải tiến
-    
-    Args:
-        face_image: Ảnh khuôn mặt đã cắt
-        face_mesh: Đối tượng FaceMesh của MediaPipe
-        
-    Returns:
-        Nhãn góc nhìn: "front", "left", "right", "up", "down" hoặc "other"
-    """
-    # Chuyển đổi sang RGB
-    face_rgb = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
-    
-    # Phát hiện các điểm mốc trên khuôn mặt
-    results = face_mesh.process(face_rgb)
-    
-    if not results.multi_face_landmarks:
-        return "other"
-    
-    # Lấy kích thước ảnh
-    h, w, _ = face_image.shape
-    
-    # Dùng set cố định các điểm mốc để đảm bảo ổn định
-    # MediaPipe Face Mesh có 468 điểm mốc
-    # Điểm mốc quan trọng:
-    # - Mũi: điểm 1
-    # - Mắt trái: điểm 33, 133
-    # - Mắt phải: điểm 263, 362
-    # - Miệng: điểm 61, 291
-    # - Cằm: điểm 199
-    # - Trán: điểm 10
-    try:
-        landmarks = results.multi_face_landmarks[0].landmark
-        
-        # Trích xuất các điểm mốc quan trọng
-        nose_tip = (landmarks[1].x, landmarks[1].y, landmarks[1].z)
-        left_eye = (landmarks[33].x, landmarks[33].y, landmarks[33].z) 
-        right_eye = (landmarks[263].x, landmarks[263].y, landmarks[263].z)
-        forehead = (landmarks[10].x, landmarks[10].y, landmarks[10].z)
-        chin = (landmarks[199].x, landmarks[199].y, landmarks[199].z)
-        left_mouth = (landmarks[61].x, landmarks[61].y, landmarks[61].z)
-        right_mouth = (landmarks[291].x, landmarks[291].y, landmarks[291].z)
-        
-        # Tính tâm của mặt
-        face_center_x = (left_eye[0] + right_eye[0]) / 2
-        face_center_y = (forehead[1] + chin[1]) / 2
-        
-        # Tính khoảng cách giữa hai mắt (để chuẩn hóa)
-        eye_distance = abs(right_eye[0] - left_eye[0])
-        
-        # 1. Đánh giá góc nghiêng trái/phải (yaw)
-        # Tính độ lệch của mũi so với tâm mặt, chuẩn hóa theo khoảng cách mắt
-        nose_offset_x = (nose_tip[0] - face_center_x) / eye_distance
-        
-        # 2. Đánh giá góc ngửa/cúi (pitch)
-        # Tính tỷ lệ khoảng cách từ mũi đến cằm so với mũi đến trán
-        vertical_ratio = abs(nose_tip[1] - chin[1]) / abs(nose_tip[1] - forehead[1])
-        
-        # Phân loại dựa trên các thông số đã tính
-        # Góc nghiêng trái/phải
-        if abs(nose_offset_x) < 0.1:  # Mũi gần với tâm mặt
-            # Góc ngửa/cúi
-            if vertical_ratio < 0.8:  # Khoảng cách mũi-cằm ngắn hơn mũi-trán -> ngửa lên
-                return "up"
-            elif vertical_ratio > 1.2:  # Khoảng cách mũi-cằm dài hơn mũi-trán -> cúi xuống
-                return "down"
-            else:
-                return "front"
-        elif nose_offset_x < -0.1:  # Mũi lệch về bên trái so với tâm
-            return "left"
-        else:  # Mũi lệch về bên phải so với tâm
-            return "right"
-            
-    except (IndexError, AttributeError) as e:
-        print(f"Lỗi khi trích xuất điểm mốc: {e}")
-        return "other"
-
-def split_data_stratified(raw_folder, train_folder, test_folder, val_folder, train_ratio=0.7, test_ratio=0.15):
-    """
-    Chia dữ liệu vào các thư mục train, test, validation với sự cân bằng theo góc nhìn
-    
-    Args:
-        raw_folder: Thư mục chứa dữ liệu gốc
-        train_folder: Thư mục dữ liệu huấn luyện
-        test_folder: Thư mục dữ liệu kiểm thử
-        val_folder: Thư mục dữ liệu xác thực
-        train_ratio: Tỷ lệ dữ liệu huấn luyện
-        test_ratio: Tỷ lệ dữ liệu kiểm thử (val_ratio = 1 - train_ratio - test_ratio)
-    """
-    # Đảm bảo các thư mục tồn tại
-    ensure_dir(train_folder)
-    ensure_dir(test_folder)
-    ensure_dir(val_folder)
-    
-    # Khởi tạo MediaPipe Face Mesh
-    mp_face_mesh = mp.solutions.face_mesh
-    face_mesh = mp_face_mesh.FaceMesh(
-        static_image_mode=True,
-        max_num_faces=1,
-        min_detection_confidence=0.5)
-    
-    # Lấy danh sách thư mục con trong raw_folder (mỗi thư mục là một student)
-    student_folders = [d for d in os.listdir(raw_folder) if os.path.isdir(os.path.join(raw_folder, d))]
-    
-    for student_folder in student_folders:
-        # Tạo thư mục tương ứng trong train, test, val
-        student_id = student_folder
-        
-        train_student_folder = os.path.join(train_folder, student_id)
-        test_student_folder = os.path.join(test_folder, student_id)
-        val_student_folder = os.path.join(val_folder, student_id)
-        
-        ensure_dir(train_student_folder)
-        ensure_dir(test_student_folder)
-        ensure_dir(val_student_folder)
-        
-        # Lấy danh sách hình ảnh trong thư mục raw của sinh viên
-        raw_student_folder = os.path.join(raw_folder, student_folder)
-        images = [f for f in os.listdir(raw_student_folder) if f.endswith(('.jpg', '.jpeg', '.png'))]
-        
-        # Phân loại ảnh theo góc nhìn
-        orientation_groups = {
-            "front": [],
-            "left": [],
-            "right": [],
-            "up": [],
-            "down": [],
-            "other": []
-        }
-        
-        print(f"Phân loại góc nhìn cho sinh viên {student_id}...")
-        for img_file in tqdm(images):
-            img_path = os.path.join(raw_student_folder, img_file)
-            img = cv2.imread(img_path)
-            if img is None:
-                continue
-            
-            # Phân loại góc nhìn với phương pháp cải tiến
-            orientation = classify_face_orientation(img, face_mesh)
-            orientation_groups[orientation].append(img_file)
-        
-        # In thống kê
-        for orientation, imgs in orientation_groups.items():
-            print(f"  - {orientation}: {len(imgs)} ảnh")
-        
-        # Chia mỗi nhóm góc nhìn vào train, test, val theo tỷ lệ
-        train_images = []
-        test_images = []
-        val_images = []
-        
-        for orientation, group_images in orientation_groups.items():
-            # Xáo trộn ngẫu nhiên trong mỗi nhóm
-            random.shuffle(group_images)
-            
-            # Tính số lượng ảnh cho mỗi tập từ nhóm này
-            num_images = len(group_images)
-            num_train = int(num_images * train_ratio)
-            num_test = int(num_images * test_ratio)
-            
-            # Chia thành các tập
-            train_images.extend(group_images[:num_train])
-            test_images.extend(group_images[num_train:num_train+num_test])
-            val_images.extend(group_images[num_train+num_test:])
-        
-        # Sao chép ảnh vào các thư mục tương ứng
-        for img in train_images:
-            shutil.copy2(os.path.join(raw_student_folder, img), os.path.join(train_student_folder, img))
-        
-        for img in test_images:
-            shutil.copy2(os.path.join(raw_student_folder, img), os.path.join(test_student_folder, img))
-        
-        for img in val_images:
-            shutil.copy2(os.path.join(raw_student_folder, img), os.path.join(val_student_folder, img))
-        
-        print(f"Sinh viên {student_id}: {len(train_images)} training, {len(test_images)} testing, {len(val_images)} validation images")
-    
-    # Giải phóng tài nguyên
-    face_mesh.close()
-
-def process_all_videos(video_folder, raw_folder, train_folder, test_folder, val_folder, frames_per_video=100):
+def process_all_videos(video_folder, raw_folder, frames_per_video=100):
     """
     Xử lý tất cả các video trong thư mục
     
     Args:
         video_folder: Thư mục chứa các video
         raw_folder: Thư mục đầu ra cho ảnh raw
-        train_folder: Thư mục dữ liệu huấn luyện
-        test_folder: Thư mục dữ liệu kiểm thử
-        val_folder: Thư mục dữ liệu xác thực
         frames_per_video: Số lượng frame cần trích xuất từ mỗi video
     """
     # Đảm bảo các thư mục tồn tại
     ensure_dir(raw_folder)
-    ensure_dir(train_folder)
-    ensure_dir(test_folder)
-    ensure_dir(val_folder)
     
     # Lấy danh sách video trong thư mục
     videos = [f for f in os.listdir(video_folder) if f.endswith(('.mp4', '.avi', '.mov'))]
@@ -494,7 +247,7 @@ def process_all_videos(video_folder, raw_folder, train_folder, test_folder, val_
     for video in videos:
         video_path = os.path.join(video_folder, video)
         
-        # Lấy tên sinh viên từ tên video (bỏ đuôi file)
+        # Lấy tên sinh viên từ tên video
         student_id = os.path.splitext(video)[0]
         
         # Tạo thư mục cho sinh viên trong raw
@@ -504,23 +257,19 @@ def process_all_videos(video_folder, raw_folder, train_folder, test_folder, val_
         # Trích xuất frame từ video
         extract_frames_from_video(video_path, raw_student_folder, num_frames=frames_per_video)
     
-    # Thay đổi từ split_data sang split_data_stratified
-    split_data_stratified(raw_folder, train_folder, test_folder, val_folder)
+    print(f"Đã hoàn thành trích xuất ảnh từ video, lưu trong thư mục {raw_folder}")
 
 if __name__ == "__main__":
     # Đường dẫn đến các thư mục
-    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # KLTN/
+    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Graduate_thesis/
     video_folder = os.path.join(project_dir, "data", "videos")
     raw_folder = os.path.join(project_dir, "data", "raw")
-    train_folder = os.path.join(project_dir, "data", "train")
-    test_folder = os.path.join(project_dir, "data", "test")
-    val_folder = os.path.join(project_dir, "data", "validation")
     
     # Cấu hình
-    frames_per_video = 100  # Số lượng frame cần trích xuất từ mỗi video
-    image_size = 224  # Kích thước ảnh đầu ra (224x224 là kích thước phổ biến cho nhiều mô hình CNN)
+    frames_per_video = 100 
+    image_size = 224
     
     print(f"Trích xuất {frames_per_video} ảnh từ mỗi video, kích thước {image_size}x{image_size} pixel")
     
     # Xử lý tất cả các video
-    process_all_videos(video_folder, raw_folder, train_folder, test_folder, val_folder, frames_per_video)
+    process_all_videos(video_folder, raw_folder, frames_per_video)
