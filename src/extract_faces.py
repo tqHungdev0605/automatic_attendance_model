@@ -5,7 +5,7 @@ import shutil
 from tqdm import tqdm
 import random
 import mediapipe as mp
-import math
+from scipy.spatial import distance
 
 # Khởi tạo MediaPipe Face Detection
 mp_face_detection = mp.solutions.face_detection
@@ -38,7 +38,7 @@ def detect_and_crop_face(image, target_size=224, padding_percent=0.2):
     if not results.detections:
         return None
     
-    # Lấy khuôn mặt đầu tiên phát hiện được
+    # Lấy khuôn mặt đầu tiên có độ tin cậy cao nhất
     detection = results.detections[0]
     bboxC = detection.location_data.relative_bounding_box
     
@@ -50,6 +50,11 @@ def detect_and_crop_face(image, target_size=224, padding_percent=0.2):
     y = int(bboxC.ymin * ih)
     w = int(bboxC.width * iw)
     h = int(bboxC.height * ih)
+    
+    # Kiểm tra nếu khuôn mặt quá nhỏ
+    min_face_size = 50
+    if w < min_face_size or h < min_face_size:
+        return None
     
     # Tính toán padding dựa trên phần trăm kích thước khuôn mặt
     padding_x = int(w * padding_percent)
@@ -103,22 +108,71 @@ def calculate_frame_difference(frame1, frame2):
     gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
     gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
     
-    # Tính toán sự khác biệt
-    diff = cv2.absdiff(gray1, gray2)
-    score = np.sum(diff) / (diff.shape[0] * diff.shape[1])
+    # Resize để đảm bảo cùng kích thước
+    if gray1.shape != gray2.shape:
+        gray2 = cv2.resize(gray2, (gray1.shape[1], gray1.shape[0]))
     
-    return score
+    # Tính toán sự khác biệt sử dụng MSE (Mean Squared Error)
+    mse = np.mean((gray1.astype(np.float32) - gray2.astype(np.float32)) ** 2)
+    
+    # Tính toán histogram khoảng cách
+    hist1 = cv2.calcHist([gray1], [0], None, [256], [0, 256])
+    hist2 = cv2.calcHist([gray2], [0], None, [256], [0, 256])
+    
+    # Chuẩn hóa histogram
+    cv2.normalize(hist1, hist1, 0, 1, cv2.NORM_MINMAX)
+    cv2.normalize(hist2, hist2, 0, 1, cv2.NORM_MINMAX)
+    
+    # Tính khoảng cách histogram
+    hist_dist = cv2.compareHist(hist1, hist2, cv2.HISTCMP_BHATTACHARYYA)
+    
+    # Kết hợp các đo lường khác biệt
+    difference_score = 0.5 * mse + 0.5 * hist_dist * 1000
+    
+    return difference_score
 
-def extract_frames_from_video(video_path, output_folder, num_frames=100, target_size=224, diff_threshold=5.0):
+def segment_video(video_path, num_segments=12):
     """
-    Trích xuất và cắt khuôn mặt đa dạng từ video
+    Phân đoạn video thành các đoạn có độ dài bằng nhau
+    
+    Args:
+        video_path: Đường dẫn tới file video
+        num_segments: Số lượng đoạn cần chia
+        
+    Returns:
+        Danh sách các đoạn (segment), mỗi đoạn là một khoảng frame [start, end]
+    """
+    # Đọc video
+    video = cv2.VideoCapture(video_path)
+    
+    # Lấy tổng số frame
+    total_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    # Giải phóng tài nguyên
+    video.release()
+    
+    # Tính kích thước của mỗi đoạn
+    segment_size = total_frames // num_segments
+    
+    # Tạo danh sách các đoạn
+    segments = []
+    for i in range(num_segments):
+        start_frame = i * segment_size
+        end_frame = min((i + 1) * segment_size - 1, total_frames - 1)
+        segments.append((start_frame, end_frame))
+    
+    return segments
+
+def extract_diverse_frames_from_video(video_path, output_folder, num_segments=12, frames_per_segment=8, target_size=224):
+    """
+    Trích xuất và cắt các khung hình đa dạng từ video
     
     Args:
         video_path: Đường dẫn đến file video
         output_folder: Thư mục đầu ra để lưu các frame
-        num_frames: Số lượng frame cần trích xuất
-        target_size: Kích thước đích của ảnh đầu ra (pixel)
-        diff_threshold: Ngưỡng khác biệt tối thiểu giữa các frame liên tiếp
+        num_segments: Số lượng đoạn video được chia
+        frames_per_segment: Số frame trích xuất từ mỗi đoạn
+        target_size: Kích thước ảnh đầu ra (pixel)
     
     Returns:
         Số lượng frame đã lưu thành công
@@ -134,34 +188,32 @@ def extract_frames_from_video(video_path, output_folder, num_frames=100, target_
         print(f"Error: Không thể mở video {video_path}")
         return 0
     
-    # Lấy tổng số frame và FPS
+    # Lấy thông tin video
     total_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = video.get(cv2.CAP_PROP_FPS)
-    duration = total_frames / fps  # Thời lượng video (giây)
+    duration = total_frames / fps
     
     print(f"Video info: {total_frames} frames, {fps} fps, {duration:.2f} seconds")
     
-    # Chia video thành num_segments phân đoạn và lấy frames từ mỗi phân đoạn
-    num_segments = min(num_frames, 20)  # Chia tối đa 20 phân đoạn
-    frames_per_segment = num_frames // num_segments
-    segment_length = total_frames // num_segments
+    # Phân đoạn video
+    segments = segment_video(video_path, num_segments)
     
-    # Danh sách lưu các frame đã trích xuất và điểm khác biệt
-    candidate_frames = []
-    last_saved_face = None
+    # Tạo danh sách để lưu các frame đã trích xuất
+    saved_frames = []
     
-    # Duyệt qua các phân đoạn
-    with tqdm(total=num_frames, desc=f"Extracting frames from {os.path.basename(video_path)}") as pbar:
-        for segment in range(num_segments):
-            # Vị trí bắt đầu và kết thúc của phân đoạn
-            start_frame = segment * segment_length
-            end_frame = min(start_frame + segment_length, total_frames)
+    # Duyệt qua từng đoạn để trích xuất frame
+    with tqdm(total=num_segments * frames_per_segment, desc=f"Extracting frames from {os.path.basename(video_path)}") as pbar:
+        for segment_idx, (start_frame, end_frame) in enumerate(segments):
+            # Lấy một số frame từ segment để tìm kiếm sự đa dạng
+            sample_frames = []
             
-            # Lấy nhiều frame từ phân đoạn để chọn frame tốt nhất
-            sample_indices = np.linspace(start_frame, end_frame - 1, frames_per_segment * 3, dtype=int)
+            # Xác định số lượng frame cần lấy mẫu (khoảng 3 lần số lượng frames_per_segment)
+            num_samples = min(frames_per_segment * 3, end_frame - start_frame + 1)
             
-            segment_candidates = []
+            # Lấy mẫu các frame cách đều nhau trong đoạn
+            sample_indices = np.linspace(start_frame, end_frame, num_samples, dtype=int)
             
+            # Duyệt qua các frame mẫu để đọc và kiểm tra khuôn mặt
             for frame_idx in sample_indices:
                 # Đặt vị trí đọc frame
                 video.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
@@ -173,72 +225,83 @@ def extract_frames_from_video(video_path, output_folder, num_frames=100, target_
                 if not success:
                     continue
                 
-                # Phát hiện, cắt khuôn mặt thành hình vuông và resize
+                # Phát hiện và cắt khuôn mặt
                 face_image = detect_and_crop_face(frame, target_size=target_size)
                 
                 # Kiểm tra nếu phát hiện được khuôn mặt
                 if face_image is not None:
-                    # Tính toán điểm khác biệt với frame cuối cùng đã lưu
-                    diff_score = 0
-                    if last_saved_face is not None:
-                        # Resize để so sánh cùng kích thước
-                        resized_face = cv2.resize(face_image, (last_saved_face.shape[1], last_saved_face.shape[0]))
-                        diff_score = calculate_frame_difference(resized_face, last_saved_face)
+                    sample_frames.append((frame_idx, face_image))
+            
+            # Nếu không có đủ frame với khuôn mặt, bỏ qua segment này
+            if len(sample_frames) < frames_per_segment:
+                for _ in range(len(sample_frames)):
+                    pbar.update(1)
+                continue
+            
+            # Thuật toán lựa chọn frame đa dạng
+            selected_frames = []
+            
+            # Chọn frame đầu tiên (có thể là frame giữa segment)
+            middle_idx = len(sample_frames) // 2
+            selected_frames.append(sample_frames[middle_idx])
+            
+            # Loại bỏ frame đã chọn khỏi danh sách mẫu
+            remaining_frames = sample_frames[:middle_idx] + sample_frames[middle_idx+1:]
+            
+            # Lựa chọn các frame còn lại dựa trên độ khác biệt
+            while len(selected_frames) < frames_per_segment and remaining_frames:
+                # Tính độ khác biệt của mỗi frame còn lại so với các frame đã chọn
+                max_diff_score = -1
+                max_diff_idx = -1
+                
+                for i, (frame_idx, frame) in enumerate(remaining_frames):
+                    # Tính tổng độ khác biệt với tất cả các frame đã chọn
+                    total_diff = sum(calculate_frame_difference(frame, selected_frame[1]) for selected_frame in selected_frames)
                     
-                    # Lưu frame và điểm số
-                    segment_candidates.append({
-                        'frame_idx': frame_idx,
-                        'face_image': face_image,
-                        'diff_score': diff_score
-                    })
+                    # Lấy frame có tổng độ khác biệt lớn nhất
+                    if total_diff > max_diff_score:
+                        max_diff_score = total_diff
+                        max_diff_idx = i
+                
+                # Thêm frame có độ khác biệt lớn nhất vào danh sách đã chọn
+                if max_diff_idx >= 0:
+                    selected_frames.append(remaining_frames[max_diff_idx])
+                    remaining_frames.pop(max_diff_idx)
+                else:
+                    break
             
-            # Sắp xếp các frame theo điểm khác biệt (từ cao xuống thấp)
-            segment_candidates.sort(key=lambda x: x['diff_score'], reverse=True)
-            
-            # Chọn các frame tốt nhất từ phân đoạn này
-            selected_candidates = segment_candidates[:frames_per_segment]
-            
-            # Thêm vào danh sách ứng viên chung
-            candidate_frames.extend(selected_candidates)
-            
-            # Cập nhật frame cuối cùng được lưu
-            if selected_candidates:
-                last_saved_face = selected_candidates[0]['face_image']
-            
-            pbar.update(len(selected_candidates))
-    
-    # Sắp xếp lại tất cả các frame theo thứ tự video
-    candidate_frames.sort(key=lambda x: x['frame_idx'])
-    
-    # Lưu các frame đã chọn
-    saved_count = 0
-    for i, candidate in enumerate(candidate_frames):
-        if i >= num_frames:
-            break
-            
-        # Tạo tên file
-        filename = os.path.join(output_folder, f"frame_{saved_count:04d}.jpg")
-        
-        # Lưu ảnh
-        cv2.imwrite(filename, candidate['face_image'])
-        saved_count += 1
+            # Lưu các frame đã chọn
+            for i, (frame_idx, face_image) in enumerate(selected_frames):
+                # Tạo tên file
+                filename = os.path.join(output_folder, f"segment_{segment_idx:02d}_frame_{i:02d}.jpg")
+                
+                # Lưu ảnh
+                cv2.imwrite(filename, face_image)
+                
+                # Thêm vào danh sách đã lưu
+                saved_frames.append((frame_idx, filename))
+                
+                # Cập nhật thanh tiến trình
+                pbar.update(1)
     
     # Giải phóng tài nguyên
     video.release()
     
-    print(f"Successfully saved {saved_count} diverse face frames from {os.path.basename(video_path)}")
-    return saved_count
+    print(f"Successfully saved {len(saved_frames)} diverse face frames from {os.path.basename(video_path)}")
+    return len(saved_frames)
 
-def process_all_videos(video_folder, raw_folder, frames_per_video=100):
+def extract_faces_from_all_videos(video_folder, raw_folder, num_segments=12, frames_per_segment=8, target_size=224):
     """
-    Xử lý tất cả các video trong thư mục
+    Xử lý tất cả các video trong thư mục, trích xuất khuôn mặt
     
     Args:
         video_folder: Thư mục chứa các video
         raw_folder: Thư mục đầu ra cho ảnh raw
-        frames_per_video: Số lượng frame cần trích xuất từ mỗi video
+        num_segments: Số đoạn cần chia cho mỗi video
+        frames_per_segment: Số frame trích xuất từ mỗi đoạn
+        target_size: Kích thước ảnh đầu ra
     """
-    # Đảm bảo các thư mục tồn tại
+    # Đảm bảo thư mục raw tồn tại
     ensure_dir(raw_folder)
     
     # Lấy danh sách video trong thư mục
@@ -247,29 +310,37 @@ def process_all_videos(video_folder, raw_folder, frames_per_video=100):
     for video in videos:
         video_path = os.path.join(video_folder, video)
         
-        # Lấy tên sinh viên từ tên video
+        # Lấy tên sinh viên từ tên video (bỏ đuôi file)
         student_id = os.path.splitext(video)[0]
         
         # Tạo thư mục cho sinh viên trong raw
         raw_student_folder = os.path.join(raw_folder, student_id)
         ensure_dir(raw_student_folder)
         
-        # Trích xuất frame từ video
-        extract_frames_from_video(video_path, raw_student_folder, num_frames=frames_per_video)
+        # Trích xuất frame đa dạng từ video
+        extract_diverse_frames_from_video(video_path, raw_student_folder, num_segments=num_segments, frames_per_segment=frames_per_segment, target_size=target_size)
     
     print(f"Đã hoàn thành trích xuất ảnh từ video, lưu trong thư mục {raw_folder}")
 
 if __name__ == "__main__":
     # Đường dẫn đến các thư mục
-    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Graduate_thesis/
+    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # KLTN/
     video_folder = os.path.join(project_dir, "data", "videos")
     raw_folder = os.path.join(project_dir, "data", "raw")
     
-    # Cấu hình
-    frames_per_video = 100 
-    image_size = 224
+    # Cấu hình trích xuất
+    num_segments = 12
+    frames_per_segment = 8
+    target_size = 224
     
-    print(f"Trích xuất {frames_per_video} ảnh từ mỗi video, kích thước {image_size}x{image_size} pixel")
+    # Tổng số frame
+    total_frames = num_segments * frames_per_segment
+    
+    print(f"Cấu hình trích xuất:")
+    print(f"- Chia mỗi video thành {num_segments} đoạn")
+    print(f"- Lấy {frames_per_segment} frame đa dạng từ mỗi đoạn")
+    print(f"- Tổng số frame tối đa sẽ trích xuất: {total_frames}")
+    print(f"- Kích thước ảnh đầu ra: {target_size}x{target_size} pixel")
     
     # Xử lý tất cả các video
-    process_all_videos(video_folder, raw_folder, frames_per_video)
+    extract_faces_from_all_videos(video_folder, raw_folder, num_segments=num_segments, frames_per_segment=frames_per_segment, target_size=target_size)
