@@ -1,0 +1,97 @@
+*Hệ thống Điểm Danh Bằng Khuôn Mặt Tự Động*
+
+Tính năng 1: Thêm Sinh Viên Mới
+Quy trình thêm sinh viên mới vào hệ thống:
+1. Nhập thông tin cơ bản:
+- Chọn chức năng "Thêm sinh viên mới" trên giao diện
+- Nhập thông tin sinh viên: Mã sinh viên, Họ tên, Lớp
+2. Thu thập dữ liệu khuôn mặt:
+- Camera tự động kích hoạt và quay một video ngắn của sinh viên
+- Hệ thống sử dụng extract_faces.py để xử lý video:
+  + Phân đoạn video thành nhiều phần bằng nhau
+  + Trích xuất nhiều khung hình từ mỗi đoạn
+  + Áp dụng thuật toán để chọn ra các khung hình đa dạng nhất về góc độ, biểu cảm
+3. Xử lý dữ liệu khuôn mặt:
+- Dùng data_processing.py để đánh giá và lọc khuôn mặt:
+  + Loại bỏ ảnh trùng lặp hoặc chất lượng kém
+  + Trích xuất đặc trưng (embedding) khuôn mặt từ các ảnh đã chọn
+  + Lưu vector đặc trưng vào thư mục embedding_cache
+4. Lưu trữ vào cơ sở dữ liệu:
+- Thông tin sinh viên và đường dẫn đến embedding được lưu vào CSDL
+- Sinh viên được thêm vào với trạng thái "Đã kích hoạt"
+
+Tính năng 2: Điểm Danh Tại Lớp
+Quy trình điểm danh tại lớp học:
+1. Thiết lập buổi học:
+- Giảng viên chọn lớp học từ danh sách có sẵn trong CSDL
+- Hệ thống tự động tải thông tin lớp học: Mã lớp, Tên lớp, Ca học, Thời gian bắt đầu và kết thúc
+- Hệ thống tải danh sách sinh viên thuộc lớp đó
+2. Quy trình điểm danh:
+- Sinh viên lần lượt nhìn vào camera để điểm danh
+- Hệ thống xử lý các bước:
+  + Phát hiện khuôn mặt trong khung hình
+  + Trích xuất đặc trưng khuôn mặt hiện tại
+  + So sánh với CSDL embedding để xác định danh tính
+  + Kiểm tra chống giả mạo (phát hiện ảnh in, video phát lại)
+3. Ghi nhận trạng thái điểm danh:
+- Điểm danh đầu giờ:
+  + Đúng giờ (0-15 phút đầu): Điểm danh thành công đầu giờ
+  + Sau 15 phút: Ghi nhận "điểm danh muộn" (0.5 điểm)
+- Điểm danh cuối giờ:
+  + Trong 15 phút cuối buổi học: Điểm danh cuối giờ thành công
+  + Không điểm danh cuối giờ: Ghi nhận "về sớm" (0.5 điểm nếu học >50% thời gian)
+- Trạng thái cuối cùng:
+  + Điểm danh đầy đủ cả đầu và cuối giờ: 1 điểm
+  + Điểm danh muộn hoặc về sớm: 0.5 điểm
+  + Không điểm danh: 0 điểm
+- Hiển thị kết quả:
+  + Tên sinh viên điểm danh thành công hiển thị trên màn hình
+  + Danh sách điểm danh được cập nhật theo thời gian thực
+
+Tính năng 3: Điểm Danh Thi
+Quy trình điểm danh trong các ca thi:
+1. Thiết lập ca thi:
+- Giảng viên chọn lớp thi và ca thi (chỉ có 5 ca thi)
+- Hệ thống tải thông tin ca thi và danh sách sinh viên dự thi
+2. Quy trình điểm danh thi:
+- Tương tự như điểm danh lớp học, nhưng chỉ cần điểm danh một lần
+- Hệ thống áp dụng các bước kiểm tra chống gian lận nghiêm ngặt hơn
+3. Ghi nhận trạng thái thi:
+- Điểm danh trong 15 phút đầu: "Thi"
+- Không điểm danh hoặc điểm danh sau 15 phút: "Không thi"
+
+Tính năng 4: Nhập Danh Sách Sinh Viên
+Quy trình nhập danh sách sinh viên hàng loạt:
+1. Chọn lớp học:
+- Chọn chức năng "Thêm danh sách" trên giao diện
+- Chọn lớp học từ danh sách có sẵn trong CSDL
+2. Nhập danh sách:
+- Tải lên file Excel chứa danh sách sinh viên
+- Hệ thống đọc file Excel và trích xuất thông tin sinh viên
+3. Kiểm tra và lưu trữ:
+- Kiểm tra tính hợp lệ của dữ liệu (mã sinh viên trùng lặp, định dạng...)
+- Thêm sinh viên vào CSDL với trạng thái "Chưa có dữ liệu khuôn mặt"
+
+Tính năng 5: Xuất Báo Cáo
+Hệ thống hỗ trợ hai loại báo cáo:
+1. Báo cáo buổi học/thi:
+- Xuất ngay sau khi kết thúc buổi học hoặc ca thi
+- Bao gồm danh sách điểm danh chi tiết với trạng thái của từng sinh viên
+- Thống kê số lượng có mặt, vắng mặt, đi muộn, về sớm
+2. Báo cáo kỳ học:
+- Tổng hợp điểm danh trong toàn bộ kỳ học
+- Bao gồm danh sách sinh viên với tổng số buổi học, số buổi có mặt, tỷ lệ tham dự
+- Cột ghi chú "CT_QT" cho sinh viên có tỷ lệ điểm danh dưới 30%
+- Có thể xuất báo cáo cho từng sinh viên riêng lẻ
+
+*Quy trình Kỹ thuật Bên dưới*
+Hệ thống sử dụng các module kỹ thuật sau để hỗ trợ các tính năng trên:
+- extract_faces.py: Trích xuất khuôn mặt từ video với MediaPipe
+- data_processing.py: Xử lý và chuẩn bị dữ liệu khuôn mặt, phân cụm ảnh
+- face_recognition.py: Nhận diện khuôn mặt với mô hình MobileNetV2
+- anti_spoofing.py: Phát hiện khuôn mặt giả mạo
+- database.py: Quản lý CSDL sinh viên và điểm danh
+- gui.py: Giao diện người dùng đồ họa (với DearPyGUI)
+- reporting.py: Tạo báo cáo và thống kê điểm danh
+
+Tất cả các module này kết hợp với nhau tạo nên một hệ thống hoàn chỉnh giúp tự động hóa quy trình điểm danh, đảm bảo tính chính xác và hiệu quả, đồng thời ngăn chặn gian lận.

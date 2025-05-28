@@ -1,0 +1,38 @@
+cấu trúc KLTN
+
+Graduate_thesis/
+├── .git/                      # Thư mục Git để quản lý phiên bản
+├── .gitignore                 # Cấu hình Git ignore (loại trừ file không cần theo dõi)
+├── data/                      # Dữ liệu của dự án
+│   ├── cluster_visualization/ # Hình ảnh trực quan hóa phân cụm khuôn mặt
+│   ├── embeddings/            # Lưu trữ vector đặc trưng của sinh viên
+│   │   └── face_embeddings.pkl # File chứa vector đặc trưng và thông tin sinh viên
+│   ├── raw/                   # Dữ liệu thô, chưa xử lý
+│   ├── test/                  # Dữ liệu kiểm thử cho mô hình
+│   ├── train/                 # Dữ liệu huấn luyện cho mô hình
+│   ├── validation/            # Dữ liệu validation cho mô hình
+│   └── videos/                # Video gốc để trích xuất khuôn mặt
+│       ├── student01.mp4
+│       ├── ...
+│       └── student30.mp4
+├── docs/                      # Tài liệu dự án
+├── models/                    # Lưu trữ các mô hình đã huấn luyện
+│   ├── mobilenetv2_face.h5    # Mô hình nhận diện khuôn mặt
+│   └── anti_spoofing_model.h5 # Mô hình chống giả mạo
+├── myenv/                     # Môi trường ảo Python
+├── reports/                   # Báo cáo, kết quả phân tích
+│   ├── attendance_statistics/ # Thống kê điểm danh
+│   └── model_evaluation/      # Đánh giá hiệu suất mô hình
+├── src/                       # Mã nguồn chính
+│   ├── data_processing.py     # Xử lý và chuẩn bị dữ liệu, phân chia tập
+│   ├── extract_faces.py       # Trích xuất khuôn mặt từ ảnh và video
+│   ├── face_recognition.py    # Nhận diện khuôn mặt sử dụng mô hình đã huấn luyện
+│   ├── face_embeddings.py     # Quản lý trích xuất và lưu trữ vector đặc trưng
+│   ├── anti_spoofing.py       # Phát hiện gian lận
+│   ├── attendance.py          # Xử lý logic điểm danh và ghi nhận
+│   ├── database.py            # Quản lý cơ sở dữ liệu sinh viên và điểm danh
+│   ├── reporting.py           # Tạo báo cáo và thống kê điểm danh
+│   ├── gui.py                 # Giao diện người dùng đồ họa (sử dụng dearpygui)
+│   └── main.py                # File chính khởi động ứng dụng
+├── test_data/                 # Dữ liệu kiểm thử riêng biệt
+└── requirements.txt           # Danh sách thư viện cần thiết
