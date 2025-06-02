@@ -1,652 +1,568 @@
 import dearpygui.dearpygui as dpg
 import cv2
-import numpy as np
 import threading
 import time
 import os
-import json
-from datetime import datetime
-import queue
+import numpy as np
 
-# Import các module của dự án
+# Import các module
+from database import SimpleDatabase
+from attendance import AttendanceSystem
 from face_recognition import FaceRecognition
 from anti_spoofing import AntiSpoofing
 
 class AttendanceGUI:
     def __init__(self):
-        """Khởi tạo giao diện điểm danh"""
+        # Khởi tạo database
+        self.db = SimpleDatabase("data/students.db")
+        
+        # Khởi tạo AI models
+        self.face_model = None
+        self.antispoof_model = None
+        self.attendance_system = None
+        
+        # Camera
         self.camera = None
+        self.is_camera_running = False
         self.camera_thread = None
-        self.is_running = False
         self.current_frame = None
-        self.frame_queue = queue.Queue(maxsize=2)
         
-        # Khởi tạo các module AI
-        self.face_recognition = None
-        self.anti_spoofing = AntiSpoofing()
+        # Trạng thái
+        self.is_recording = False
+        self.is_attending = False
+        self.video_writer = None
         
-        # Trạng thái ứng dụng
-        self.anti_spoofing_enabled = True  # Luôn bật chống gian lận
-        self.last_recognition_time = 0
-        self.recognition_cooldown = 1.0  # Giảm cooldown xuống 1 giây
+        # Khởi tạo AI models
+        self.init_ai_models()
         
-        # Trạng thái kiểm tra liveness
-        self.pending_recognitions = {}  # Lưu kết quả nhận diện chờ xác thực
-        self.liveness_verified_time = 0
-        self.liveness_valid_duration = 10.0  # Liveness có hiệu lực 10 giây
-        
-        # Dữ liệu điểm danh
-        self.attendance_records = []
-        self.student_list = []
-        
-        # Kích thước cửa sổ
-        self.window_width = 1200
-        self.window_height = 800
-        self.camera_width = 640
-        self.camera_height = 480
-        
-        # Khởi tạo DearPyGui
-        dpg.create_context()
         self.setup_gui()
-
-    def setup_gui(self):
-        """Thiết lập giao diện người dùng"""
-        # Tạo viewport
-        dpg.create_viewport(
-            title="Hệ thống điểm danh bằng nhận diện khuôn mặt - Tích hợp chống gian lận",
-            width=self.window_width,
-            height=self.window_height,
-            resizable=False
+    
+    def init_ai_models(self):
+        """Khởi tạo các mô hình AI"""
+        try:
+            print("Đang khởi tạo mô hình nhận diện khuôn mặt...")
+            self.face_model = FaceRecognition(
+                model_path="models/model.tflite",
+                class_indices_path="models/class_indices.json"
+            )
+            print("✅ Mô hình nhận diện OK")
+            
+            print("Đang khởi tạo mô hình chống gian lận...")
+            self.antispoof_model = AntiSpoofing()
+            print("✅ Mô hình chống gian lận OK")
+            
+            # Khởi tạo hệ thống điểm danh
+            self.attendance_system = AttendanceSystem(
+                self.db, self.face_model, self.antispoof_model
+            )
+            print("✅ Hệ thống điểm danh OK")
+            
+        except Exception as e:
+            print(f"⚠️ Lỗi khởi tạo AI models: {e}")
+            print("Sử dụng mock models để test...")
+            self.use_mock_models()
+    
+    def use_mock_models(self):
+        """Sử dụng mock models khi không có model thật"""
+        self.face_model = MockFaceRecognition()
+        self.antispoof_model = MockAntiSpoofing()
+        self.attendance_system = AttendanceSystem(
+            self.db, self.face_model, self.antispoof_model
         )
+    
+    def setup_gui(self):
+        """Tạo giao diện"""
+        dpg.create_context()
         
         # Tạo texture cho camera
-        self.setup_camera_texture()
-        
-        # Tạo cửa sổ chính
-        with dpg.window(label="Main Window", tag="main_window", no_close=True, no_move=True, no_resize=True):
-            dpg.set_primary_window("main_window", True)
-            
-            # Header
-            with dpg.group(horizontal=True):
-                dpg.add_text("HE THONG DIEM DANH THONG MINH - CHONG GIAN LAN TICH HOP", 
-                           color=[255, 255, 255], tag="title_text")
-                dpg.add_spacer(width=50)
-                dpg.add_text("", tag="current_time")
-            
-            dpg.add_separator()
-            
-            # Main content - chia thành 2 cột
-            with dpg.group(horizontal=True):
-                # Cột trái - Camera và điều khiển
-                with dpg.child_window(width=680, height=600, border=True, tag="left_panel"):
-                    dpg.add_text("CAMERA & NHAN DIEN THONG MINH", color=[100, 200, 100])
-                    dpg.add_separator()
-                    
-                    # Camera display
-                    dpg.add_image("camera_texture", width=self.camera_width, height=self.camera_height)
-                    
-                    dpg.add_separator()
-                    
-                    # Điều khiển camera
-                    with dpg.group(horizontal=True):
-                        dpg.add_button(label="BAT CAMERA", callback=self.start_camera, tag="start_camera_btn")
-                        dpg.add_button(label="TAT CAMERA", callback=self.stop_camera, tag="stop_camera_btn")
-                        dpg.add_button(label="CHUP ANH", callback=self.capture_photo, tag="capture_btn")
-                        dpg.add_button(label="RESET XAC THUC", callback=self.reset_verification, tag="reset_btn")
-                    
-                    dpg.add_separator()
-                    
-                    # Cấu hình bảo mật
-                    dpg.add_text("CAU HINH BAO MAT:")
-                    dpg.add_checkbox(
-                        label="Bat kiem tra chong gia mao", 
-                        default_value=True,
-                        callback=self.toggle_anti_spoofing,
-                        tag="anti_spoofing_checkbox"
-                    )
-                    with dpg.group(horizontal=True):
-                        dpg.add_text("Thoi gian hieu luc xac thuc:")
-                        dpg.add_slider_float(
-                            label="giay", 
-                            default_value=10.0,
-                            min_value=5.0,
-                            max_value=30.0,
-                            callback=self.update_liveness_duration,
-                            tag="liveness_duration_slider",
-                            width=150
-                        )
-                    
-                    dpg.add_separator()
-                    
-                    # Trạng thái hệ thống
-                    dpg.add_text("TRANG THAI HE THONG:")
-                    with dpg.group():
-                        dpg.add_text("Model: Not loaded", tag="model_status", color=[255, 100, 100])
-                        dpg.add_text("Camera: Disconnected", tag="camera_status", color=[255, 100, 100])
-                        dpg.add_text("Liveness: Standby", tag="liveness_status", color=[200, 200, 200])
-                        dpg.add_text("Recognition: Standby", tag="recognition_status", color=[200, 200, 200])
-                
-                # Cột phải - Kết quả và điều khiển
-                with dpg.child_window(width=500, height=600, border=True, tag="right_panel"):
-                    dpg.add_text("KET QUA & QUAN LY", color=[100, 200, 100])
-                    dpg.add_separator()
-                    
-                    # Load model section
-                    dpg.add_text("TAI MODEL:")
-                    with dpg.group(horizontal=True):
-                        dpg.add_input_text(
-                            default_value="models/model.tflite",
-                            width=300,
-                            tag="model_path_input"
-                        )
-                        dpg.add_button(label="TAI MODEL", callback=self.load_model)
-                    
-                    with dpg.group(horizontal=True):
-                        dpg.add_input_text(
-                            default_value="models/class_indices.json",
-                            width=300,
-                            tag="class_indices_path_input"
-                        )
-                        dpg.add_button(label="TAI DANH SACH LOP", callback=self.load_class_indices)
-                    
-                    dpg.add_separator()
-                    
-                    # Quy trình xác thực
-                    dpg.add_text("QUY TRINH XAC THUC:")
-                    with dpg.group():
-                        dpg.add_text("Buoc 1: Phat hien khuon mat", tag="step1_status", color=[200, 200, 200])
-                        dpg.add_text("Buoc 2: Kiem tra tinh song", tag="step2_status", color=[200, 200, 200])
-                        dpg.add_text("Buoc 3: Nhan dien danh tinh", tag="step3_status", color=[200, 200, 200])
-                        dpg.add_text("Buoc 4: Ghi nhan diem danh", tag="step4_status", color=[200, 200, 200])
-                    
-                    dpg.add_separator()
-                    
-                    # Kết quả nhận diện hiện tại
-                    dpg.add_text("KET QUA HIEN TAI:")
-                    with dpg.group():
-                        dpg.add_text("Ten sinh vien: ---", tag="current_student_name", color=[255, 255, 100])
-                        dpg.add_text("Do tin cay: ---", tag="current_confidence", color=[255, 255, 100])
-                        dpg.add_text("Trang thai xac thuc: ---", tag="current_verification", color=[255, 255, 100])
-                        dpg.add_text("Thoi gian con lai: ---", tag="time_remaining", color=[255, 255, 100])
-                    
-                    dpg.add_separator()
-                    
-                    # Danh sách điểm danh
-                    dpg.add_text("LICH SU DIEM DANH:")
-                    with dpg.child_window(height=200, border=True, tag="attendance_list"):
-                        with dpg.table(
-                            header_row=True,
-                            borders_innerH=True,
-                            borders_outerH=True,
-                            borders_innerV=True,
-                            borders_outerV=True,
-                            tag="attendance_table"
-                        ):
-                            dpg.add_table_column(label="STT", width_fixed=True, init_width_or_weight=40)
-                            dpg.add_table_column(label="Ten SV", width_fixed=True, init_width_or_weight=120)
-                            dpg.add_table_column(label="Thoi gian", width_fixed=True, init_width_or_weight=100)
-                            dpg.add_table_column(label="Tin cay", width_fixed=True, init_width_or_weight=60)
-                            dpg.add_table_column(label="Xac thuc", width_fixed=True, init_width_or_weight=80)
-                    
-                    dpg.add_separator()
-                    
-                    # Điều khiển điểm danh
-                    with dpg.group(horizontal=True):
-                        dpg.add_button(label="XOA DANH SACH", callback=self.clear_attendance)
-                        dpg.add_button(label="XUAT BAO CAO", callback=self.export_report)
-            
-            # Status bar
-            dpg.add_separator()
-            with dpg.group(horizontal=True):
-                dpg.add_text("Ready", tag="status_bar", color=[100, 255, 100])
-                dpg.add_spacer(width=200)
-                dpg.add_text("Tong so sinh vien da diem danh: 0", tag="total_count")
-
-    def setup_camera_texture(self):
-        """Thiết lập texture cho hiển thị camera"""
-        # Tạo texture trống ban đầu
-        blank_data = np.zeros((self.camera_height, self.camera_width, 3), dtype=np.uint8)
-        blank_data.fill(50)  # Màu xám đậm
-        
-        # Thêm text "No Camera" vào ảnh trống
-        cv2.putText(blank_data, "NO CAMERA", (200, 240), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
-        
-        # Chuyển đổi từ BGR sang RGBA
-        blank_data_rgba = cv2.cvtColor(blank_data, cv2.COLOR_BGR2RGBA)
-        blank_data_flat = blank_data_rgba.flatten().astype(np.float32) / 255.0
-        
-        # Tạo texture
         with dpg.texture_registry():
-            dpg.add_raw_texture(
-                width=self.camera_width,
-                height=self.camera_height,
-                default_value=blank_data_flat,
-                format=dpg.mvFormat_Float_rgba,
-                tag="camera_texture"
-            )
-
-    def update_time(self):
-        """Cập nhật thời gian hiện tại"""
-        current_time = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        dpg.set_value("current_time", f"Thoi gian: {current_time}")
-
-    def toggle_anti_spoofing(self, sender, app_data):
-        """Bật/tắt chống giả mạo"""
-        self.anti_spoofing_enabled = app_data
-        if app_data:
-            dpg.set_value("status_bar", "Da bat kiem tra chong gia mao")
-        else:
-            dpg.set_value("status_bar", "Da tat kiem tra chong gia mao")
-            # Reset liveness khi tắt
-            self.liveness_verified_time = 0
-
-    def update_liveness_duration(self, sender, app_data):
-        """Cập nhật thời gian hiệu lực của liveness"""
-        self.liveness_valid_duration = app_data
-
-    def load_model(self):
-        """Tải mô hình nhận diện khuôn mặt"""
-        try:
-            model_path = dpg.get_value("model_path_input")
-            class_indices_path = dpg.get_value("class_indices_path_input")
+            # Texture cho camera preview
+            dpg.add_raw_texture(640, 480, np.zeros((480, 640, 4), dtype=np.float32),
+                              tag="camera_texture", format=dpg.mvFormat_Float_rgba)
+        
+        # Cửa sổ chính
+        with dpg.window(label="Hệ thống điểm danh", tag="main_window"):
             
-            if not os.path.exists(model_path):
-                dpg.set_value("model_status", f"Model not found: {model_path}")
-                dpg.set_value("status_bar", "Loi: Khong tim thay file model")
-                return
+            dpg.add_text("HE THONG DIEM DANH KHUON MAT", color=(0, 150, 255))
+            dpg.add_separator()
             
-            if not os.path.exists(class_indices_path):
-                dpg.set_value("model_status", f"Class indices not found: {class_indices_path}")
-                dpg.set_value("status_bar", "Loi: Khong tim thay file class indices")
-                return
+            # Menu chính
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Them sinh vien", callback=self.show_add_window, 
+                              width=150, height=35)
+                dpg.add_button(label="Xoa sinh vien", callback=self.show_delete_window, 
+                              width=150, height=35)
+                dpg.add_button(label="Diem danh", callback=self.show_attendance_window, 
+                              width=150, height=35)
             
-            # Tải mô hình
-            self.face_recognition = FaceRecognition(model_path, class_indices_path)
-            dpg.set_value("model_status", "Model: Loaded")
-            dpg.set_value("status_bar", "Model da duoc tai thanh cong")
+            dpg.add_separator()
             
-        except Exception as e:
-            dpg.set_value("model_status", f"Model: Error - {str(e)}")
-            dpg.set_value("status_bar", f"Loi khi tai model: {str(e)}")
-
-    def load_class_indices(self):
-        """Tải danh sách lớp"""
-        try:
-            class_indices_path = dpg.get_value("class_indices_path_input")
-            with open(class_indices_path, 'r') as f:
-                class_indices = json.load(f)
+            # Thông tin hệ thống
+            dpg.add_text("Tong sinh vien: 0", tag="total_count")
+            dpg.add_text("Diem danh hom nay: 0", tag="today_count")
+            dpg.add_text("Trang thai: San sang", tag="system_status", color=(0, 255, 0))
             
-            self.student_list = list(class_indices.keys())
-            dpg.set_value("status_bar", f"Da tai {len(self.student_list)} sinh vien")
+            dpg.add_separator()
             
-        except Exception as e:
-            dpg.set_value("status_bar", f"Loi khi tai danh sach lop: {str(e)}")
-
+            # Danh sách sinh viên
+            dpg.add_text("Danh sach sinh vien:")
+            with dpg.table(header_row=True, tag="student_table", 
+                          borders_innerH=True, borders_outerH=True):
+                dpg.add_table_column(label="Ma SV")
+                dpg.add_table_column(label="Ho ten")
+                dpg.add_table_column(label="Lop")
+                dpg.add_table_column(label="Du lieu khuon mat")
+        
+        self.update_info()
+        
+        dpg.create_viewport(title="Diem danh khuon mat", width=900, height=700)
+        dpg.setup_dearpygui()
+        dpg.set_primary_window("main_window", True)
+    
+    def show_add_window(self):
+        """Cửa sổ thêm sinh viên"""
+        if dpg.does_item_exist("add_window"):
+            dpg.delete_item("add_window")
+        
+        with dpg.window(label="Them sinh vien", tag="add_window", 
+                       width=500, height=600, modal=True):
+            
+            dpg.add_text("THONG TIN SINH VIEN", color=(0, 150, 255))
+            dpg.add_separator()
+            
+            dpg.add_input_text(label="Ma sinh vien", tag="add_id", width=200)
+            dpg.add_input_text(label="Ho ten", tag="add_name", width=300)
+            dpg.add_input_text(label="Lop", tag="add_class", width=200)
+            
+            dpg.add_separator()
+            dpg.add_text("THU THAP DU LIEU KHUON MAT", color=(0, 150, 255))
+            
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Bat dau quay", callback=self.start_record,
+                              tag="start_record_btn", width=120)
+                dpg.add_button(label="Dung quay", callback=self.stop_record,
+                              tag="stop_record_btn", width=120, enabled=False)
+            
+            # Hiển thị camera
+            dpg.add_text("Camera preview:")
+            dpg.add_image("camera_texture", width=400, height=300)
+            
+            dpg.add_text("Trang thai: Chua bat dau", tag="record_status")
+            
+            dpg.add_separator()
+            
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Luu sinh vien", callback=self.save_student, width=120)
+                dpg.add_button(label="Huy", callback=self.close_add_window, width=120)
+        
+        # Bắt đầu camera cho preview
+        self.start_camera()
+    
+    def show_delete_window(self):
+        """Cửa sổ xóa sinh viên"""
+        if dpg.does_item_exist("delete_window"):
+            dpg.delete_item("delete_window")
+        
+        students = self.db.get_all_students()
+        items = [f"{s['student_id']} - {s['full_name']}" for s in students]
+        
+        with dpg.window(label="Xoa sinh vien", tag="delete_window", 
+                       width=400, height=300, modal=True):
+            
+            if items:
+                dpg.add_text("Chon sinh vien can xoa:")
+                dpg.add_listbox(items, tag="delete_list", num_items=8, width=350)
+                dpg.add_separator()
+                dpg.add_text("Canh bao: Hanh dong nay khong the hoan tac!", color=(255, 255, 0))
+                
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="Xac nhan xoa", callback=self.delete_student, 
+                                  width=120, color=(255, 100, 100))
+                    dpg.add_button(label="Huy", callback=lambda: dpg.delete_item("delete_window"), 
+                                  width=120)
+            else:
+                dpg.add_text("Khong co sinh vien nao trong he thong")
+                dpg.add_button(label="Dong", callback=lambda: dpg.delete_item("delete_window"))
+    
+    def show_attendance_window(self):
+        """Cửa sổ điểm danh"""
+        if dpg.does_item_exist("attendance_window"):
+            dpg.delete_item("attendance_window")
+        
+        with dpg.window(label="Diem danh", tag="attendance_window", 
+                       width=700, height=650):
+            
+            dpg.add_text("DIEM DANH BANG KHUON MAT", color=(0, 150, 255))
+            dpg.add_separator()
+            
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Bat dau diem danh", callback=self.start_attendance,
+                              tag="start_att_btn", width=150)
+                dpg.add_button(label="Dung diem danh", callback=self.stop_attendance,
+                              tag="stop_att_btn", width=150, enabled=False)
+            
+            dpg.add_separator()
+            
+            # Hiển thị camera
+            dpg.add_text("Camera diem danh:")
+            dpg.add_image("camera_texture", width=500, height=375)
+            
+            dpg.add_separator()
+            
+            # Thông tin điểm danh
+            dpg.add_text("THONG TIN DIEM DANH", color=(255, 200, 0))
+            dpg.add_text("Trang thai: Chua bat dau", tag="attendance_status")
+            dpg.add_text("Da diem danh: 0 sinh vien", tag="attendance_count")
+            dpg.add_text("Vua diem danh: Chua co", tag="last_student")
+            dpg.add_text("Tin cay: 0.00", tag="confidence_score")
+        
+        # Bắt đầu camera
+        self.start_camera()
+    
     def start_camera(self):
         """Bắt đầu camera"""
-        if self.is_running:
-            return
+        if not self.camera:
+            try:
+                self.camera = cv2.VideoCapture(0)
+                if not self.camera.isOpened():
+                    self.show_message("Loi: Khong the mo camera!")
+                    return False
+                
+                # Cấu hình camera
+                self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                self.camera.set(cv2.CAP_PROP_FPS, 30)
+                
+                print("✅ Camera đã sẵn sàng")
+                
+            except Exception as e:
+                self.show_message(f"Loi khoi tao camera: {e}")
+                return False
         
-        try:
-            self.camera = cv2.VideoCapture(0)
-            if not self.camera.isOpened():
-                dpg.set_value("camera_status", "Camera: Failed")
-                dpg.set_value("status_bar", "Loi: Khong the mo camera")
-                return
-            
-            # Thiết lập độ phân giải
-            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.camera_width)
-            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.camera_height)
-            
-            self.is_running = True
-            self.camera_thread = threading.Thread(target=self.camera_loop, daemon=True)
+        # Bắt đầu camera thread
+        if not self.is_camera_running:
+            self.is_camera_running = True
+            self.camera_thread = threading.Thread(target=self.camera_loop)
+            self.camera_thread.daemon = True
             self.camera_thread.start()
-            
-            dpg.set_value("camera_status", "Camera: Connected")
-            dpg.set_value("status_bar", "Camera da duoc bat")
-            
-        except Exception as e:
-            dpg.set_value("camera_status", f"Camera: Error - {str(e)}")
-            dpg.set_value("status_bar", f"Loi camera: {str(e)}")
-
-    def stop_camera(self):
-        """Dừng camera"""
-        self.is_running = False
         
-        if self.camera_thread:
-            self.camera_thread.join(timeout=2.0)
-        
-        if self.camera:
-            self.camera.release()
-            self.camera = None
-        
-        # Reset texture về trạng thái ban đầu
-        self.setup_camera_texture()
-        
-        dpg.set_value("camera_status", "Camera: Disconnected")
-        dpg.set_value("status_bar", "Camera da duoc tat")
-
-    def reset_verification(self):
-        """Reset quá trình xác thực"""
-        self.anti_spoofing.reset()
-        self.pending_recognitions.clear()
-        self.liveness_verified_time = 0
-        self.last_recognition_time = 0
-        
-        # Reset trạng thái các bước
-        dpg.set_value("step1_status", "Buoc 1: Phat hien khuon mat")
-        dpg.set_value("step2_status", "Buoc 2: Kiem tra tinh song")
-        dpg.set_value("step3_status", "Buoc 3: Nhan dien danh tinh")
-        dpg.set_value("step4_status", "Buoc 4: Ghi nhan diem danh")
-        
-        dpg.set_value("current_student_name", "Ten sinh vien: ---")
-        dpg.set_value("current_confidence", "Do tin cay: ---")
-        dpg.set_value("current_verification", "Trang thai xac thuc: ---")
-        dpg.set_value("time_remaining", "Thoi gian con lai: ---")
-        
-        dpg.set_value("status_bar", "Da reset quy trinh xac thuc")
-
+        return True
+    
     def camera_loop(self):
         """Vòng lặp xử lý camera"""
-        while self.is_running:
-            try:
+        while self.is_camera_running:
+            if self.camera and self.camera.isOpened():
                 ret, frame = self.camera.read()
-                if not ret:
-                    continue
-                
-                # Lật ảnh theo chiều ngang
-                frame = cv2.flip(frame, 1)
-                self.current_frame = frame.copy()
-                
-                # Xử lý frame tích hợp
-                processed_frame = self.process_integrated_frame(frame)
-                
-                # Cập nhật texture
-                self.update_camera_texture(processed_frame)
-                
-                # Cập nhật thời gian
-                self.update_time()
-                
-                # Cập nhật trạng thái
-                self.update_verification_status()
-                
-                time.sleep(0.033)  # ~30 FPS
-                
-            except Exception as e:
-                print(f"Camera loop error: {e}")
-                break
-
-    def process_integrated_frame(self, frame):
-        """Xử lý frame tích hợp cả nhận diện và chống giả mạo"""
-        # Khởi tạo frame kết quả
-        result_frame = frame.copy()
-        
-        # Bước 1: Luôn thực hiện nhận diện khuôn mặt
-        recognition_results = []
-        if self.face_recognition is not None:
-            try:
-                result_frame, faces = self.face_recognition.process_frame(result_frame)
-                recognition_results = faces
-                
-                if faces:
-                    dpg.set_value("step1_status", "Buoc 1: Phat hien khuon mat ✓")
+                if ret:
+                    self.current_frame = frame.copy()
                     
-                    # Hiển thị kết quả nhận diện
-                    for (x, y, w, h, class_name, confidence) in faces:
-                        if class_name != "Unknown":
-                            dpg.set_value("current_student_name", f"Ten sinh vien: {class_name}")
-                            dpg.set_value("current_confidence", f"Do tin cay: {confidence:.2f}")
-                            dpg.set_value("step3_status", "Buoc 3: Nhan dien danh tinh ✓")
-                else:
-                    dpg.set_value("step1_status", "Buoc 1: Phat hien khuon mat")
-                    dpg.set_value("step3_status", "Buoc 3: Nhan dien danh tinh")
+                    # Ghi video nếu đang recording
+                    if self.is_recording and self.video_writer:
+                        self.video_writer.write(frame)
                     
-            except Exception as e:
-                cv2.putText(result_frame, f"Recognition error: {str(e)}", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        
-        # Bước 2: Kiểm tra chống giả mạo (nếu được bật)
-        is_live = True  # Mặc định True nếu không bật chống giả mạo
-        if self.anti_spoofing_enabled:
-            try:
-                is_live, result_frame = self.anti_spoofing.check_liveness(result_frame)
-                
-                if is_live:
-                    dpg.set_value("step2_status", "Buoc 2: Kiem tra tinh song ✓")
-                    dpg.set_value("liveness_status", "Liveness: VERIFIED")
-                    dpg.set_value("current_verification", "Trang thai xac thuc: XAC THUC THANH CONG")
-                    self.liveness_verified_time = time.time()
-                else:
-                    dpg.set_value("step2_status", "Buoc 2: Kiem tra tinh song (dang kiem tra...)")
-                    dpg.set_value("liveness_status", "Liveness: VERIFYING")
-                    dpg.set_value("current_verification", "Trang thai xac thuc: DANG XAC THUC...")
-                    
-            except Exception as e:
-                cv2.putText(result_frame, f"Anti-spoofing error: {str(e)}", (10, 60), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        else:
-            dpg.set_value("step2_status", "Buoc 2: Kiem tra tinh song (da tat)")
-            dpg.set_value("liveness_status", "Liveness: DISABLED")
-            dpg.set_value("current_verification", "Trang thai xac thuc: KHONG BAT")
-        
-        # Bước 3: Xử lý điểm danh nếu đã xác thực
-        if recognition_results and (is_live or not self.anti_spoofing_enabled):
-            self.process_attendance(recognition_results, is_live)
-        
-        # Hiển thị thông tin tổng hợp trên frame
-        self.draw_overlay_info(result_frame, recognition_results, is_live)
-        
-        return result_frame
-
-    def process_attendance(self, recognition_results, is_live):
-        """Xử lý điểm danh khi đã xác thực"""
-        current_time = time.time()
-        
-        # Kiểm tra cooldown
-        if current_time - self.last_recognition_time < self.recognition_cooldown:
-            return
-        
-        # Kiểm tra liveness có còn hiệu lực không
-        if self.anti_spoofing_enabled:
-            if current_time - self.liveness_verified_time > self.liveness_valid_duration:
-                return  # Liveness đã hết hiệu lực
-        
-        # Xử lý từng kết quả nhận diện
-        for (x, y, w, h, class_name, confidence) in recognition_results:
-            if class_name != "Unknown" and confidence > 0.7:
-                # Kiểm tra xem sinh viên đã điểm danh chưa
-                already_attended = any(record['name'] == class_name for record in self.attendance_records)
-                
-                if not already_attended:
-                    # Thêm vào danh sách điểm danh
-                    verification_status = "XAC THUC" if (is_live or not self.anti_spoofing_enabled) else "KHONG XAC THUC"
-                    self.add_attendance_record(class_name, confidence, verification_status)
-                    self.last_recognition_time = current_time
-                    
-                    dpg.set_value("step4_status", "Buoc 4: Ghi nhan diem danh ✓")
-                    break
-
-    def draw_overlay_info(self, frame, recognition_results, is_live):
-        """Vẽ thông tin overlay lên frame"""
-        # Vẽ trạng thái liveness
-        liveness_text = "LIVE" if is_live else "VERIFYING"
-        liveness_color = (0, 255, 0) if is_live else (0, 255, 255)
-        
-        if self.anti_spoofing_enabled:
-            cv2.putText(frame, f"Liveness: {liveness_text}", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, liveness_color, 2)
-        else:
-            cv2.putText(frame, "Liveness: DISABLED", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (128, 128, 128), 2)
-        
-        # Vẽ số lượng đã điểm danh
-        cv2.putText(frame, f"Attended: {len(self.attendance_records)}", (10, 60), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
-        # Vẽ thời gian còn lại của liveness (nếu có)
-        if self.anti_spoofing_enabled and self.liveness_verified_time > 0:
-            remaining = self.liveness_valid_duration - (time.time() - self.liveness_verified_time)
-            if remaining > 0:
-                cv2.putText(frame, f"Liveness valid: {remaining:.1f}s", (10, 90), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-
-    def update_verification_status(self):
-        """Cập nhật trạng thái xác thực"""
-        if self.anti_spoofing_enabled and self.liveness_verified_time > 0:
-            remaining = self.liveness_valid_duration - (time.time() - self.liveness_verified_time)
-            if remaining > 0:
-                dpg.set_value("time_remaining", f"Thoi gian con lai: {remaining:.1f}s")
-            else:
-                dpg.set_value("time_remaining", "Thoi gian con lai: Het han")
-                dpg.set_value("current_verification", "Trang thai xac thuc: HET HAN")
-        else:
-            dpg.set_value("time_remaining", "Thoi gian con lai: ---")
-
-    def update_camera_texture(self, frame):
-        """Cập nhật texture camera"""
-        try:
-            # Resize frame nếu cần
-            if frame.shape[:2] != (self.camera_height, self.camera_width):
-                frame = cv2.resize(frame, (self.camera_width, self.camera_height))
+                    # Xử lý điểm danh nếu đang attend
+                    if self.is_attending:
+                        processed_frame = self.process_attendance_frame(frame)
+                        self.update_camera_display(processed_frame)
+                    else:
+                        self.update_camera_display(frame)
             
+            time.sleep(0.033)  # ~30 FPS
+    
+    def update_camera_display(self, frame):
+        """Cập nhật hiển thị camera"""
+        try:
             # Chuyển đổi BGR sang RGBA
             frame_rgba = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
-            frame_flat = frame_rgba.flatten().astype(np.float32) / 255.0
-            
+            # Chuẩn hóa về [0,1]
+            frame_normalized = frame_rgba.astype(np.float32) / 255.0
             # Cập nhật texture
-            dpg.set_value("camera_texture", frame_flat)
+            dpg.set_value("camera_texture", frame_normalized.flatten())
+        except Exception as e:
+            print(f"Lỗi cập nhật camera display: {e}")
+    
+    def process_attendance_frame(self, frame):
+        """Xử lý frame cho điểm danh"""
+        try:
+            if self.attendance_system:
+                processed_frame, results = self.attendance_system.process_camera_frame(frame)
+                
+                # Cập nhật thông tin điểm danh
+                if results:
+                    for result in results:
+                        if result.get('success', False):
+                            name = result['student_name']
+                            confidence = result['confidence']
+                            
+                            # Cập nhật giao diện
+                            dpg.set_value("last_student", f"Vua diem danh: {name}")
+                            dpg.set_value("confidence_score", f"Tin cay: {confidence:.2f}")
+                            
+                            # Cập nhật số lượng
+                            today_count = len(self.db.get_attendance_today())
+                            dpg.set_value("attendance_count", f"Da diem danh: {today_count} sinh vien")
+                            
+                            print(f"✅ Điểm danh: {name} (tin cậy: {confidence:.2f})")
+                
+                return processed_frame
+            else:
+                return frame
+                
+        except Exception as e:
+            print(f"Lỗi xử lý điểm danh: {e}")
+            return frame
+    
+    def start_record(self):
+        """Bắt đầu quay video"""
+        if not self.start_camera():
+            return
+        
+        try:
+            # Khởi tạo video writer
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            self.video_writer = cv2.VideoWriter("temp_student_video.avi", fourcc, 20.0, (640, 480))
+            
+            self.is_recording = True
+            dpg.configure_item("start_record_btn", enabled=False)
+            dpg.configure_item("stop_record_btn", enabled=True)
+            dpg.set_value("record_status", "Trang thai: Dang quay video...")
+            
+            print("🎬 Bắt đầu quay video")
             
         except Exception as e:
-            print(f"Texture update error: {e}")
-
-    def add_attendance_record(self, student_name, confidence, verification_status):
-        """Thêm bản ghi điểm danh"""
-        # Thêm bản ghi mới
-        current_time = datetime.now().strftime("%H:%M:%S")
-        record = {
-            'name': student_name,
-            'time': current_time,
-            'confidence': confidence,
-            'verification': verification_status
-        }
-        self.attendance_records.append(record)
+            self.show_message(f"Loi bat dau quay: {e}")
+    
+    def stop_record(self):
+        """Dừng quay video"""
+        self.is_recording = False
+        dpg.configure_item("start_record_btn", enabled=True)
+        dpg.configure_item("stop_record_btn", enabled=False)
+        dpg.set_value("record_status", "Trang thai: Da dung quay")
         
-        # Cập nhật giao diện
-        self.update_attendance_display()
+        if self.video_writer:
+            self.video_writer.release()
+            self.video_writer = None
         
-        # Cập nhật tổng số
-        dpg.set_value("total_count", f"Tong so sinh vien da diem danh: {len(self.attendance_records)}")
-        dpg.set_value("status_bar", f"Da diem danh: {student_name} - {verification_status}")
-
-    def update_attendance_display(self):
-        """Cập nhật hiển thị danh sách điểm danh"""
-        # Xóa các hàng cũ
-        if dpg.does_item_exist("attendance_table"):
-            children = dpg.get_item_children("attendance_table", slot=1)
+        print("⏹️ Đã dừng quay video")
+    
+    def save_student(self):
+        """Lưu sinh viên mới"""
+        student_id = dpg.get_value("add_id").strip()
+        name = dpg.get_value("add_name").strip()
+        class_name = dpg.get_value("add_class").strip()
+        
+        # Kiểm tra thông tin
+        if not all([student_id, name, class_name]):
+            self.show_message("Vui long nhap day du thong tin!")
+            return
+        
+        # Kiểm tra video
+        if not os.path.exists("temp_student_video.avi"):
+            self.show_message("Vui long quay video khuon mat truoc!")
+            return
+        
+        try:
+            # Thêm sinh viên với video
+            success = self.attendance_system.add_new_student(
+                student_id, name, class_name, "temp_student_video.avi"
+            )
+            
+            if success:
+                self.show_message(f"Them sinh vien {name} thanh cong!")
+                
+                # Xóa file video tạm
+                if os.path.exists("temp_student_video.avi"):
+                    os.remove("temp_student_video.avi")
+                
+                # Cập nhật giao diện
+                self.update_info()
+                self.close_add_window()
+                
+                print(f"✅ Đã thêm sinh viên: {name}")
+                
+            else:
+                self.show_message("Khong the them sinh vien! Co the ma SV da ton tai.")
+                
+        except Exception as e:
+            self.show_message(f"Loi them sinh vien: {e}")
+    
+    def close_add_window(self):
+        """Đóng cửa sổ thêm sinh viên"""
+        # Dừng recording nếu đang quay
+        if self.is_recording:
+            self.stop_record()
+        
+        # Xóa file tạm nếu có
+        if os.path.exists("temp_student_video.avi"):
+            os.remove("temp_student_video.avi")
+        
+        dpg.delete_item("add_window")
+    
+    def delete_student(self):
+        """Xóa sinh viên"""
+        selected = dpg.get_value("delete_list")
+        if not selected:
+            self.show_message("Vui long chon sinh vien!")
+            return
+        
+        student_id = selected.split(" - ")[0]
+        
+        try:
+            success = self.attendance_system.remove_student(student_id)
+            
+            if success:
+                self.show_message(f"Xoa sinh vien {student_id} thanh cong!")
+                self.update_info()
+                dpg.delete_item("delete_window")
+                print(f"🗑️ Đã xóa sinh viên: {student_id}")
+            else:
+                self.show_message("Khong the xoa sinh vien!")
+                
+        except Exception as e:
+            self.show_message(f"Loi xoa sinh vien: {e}")
+    
+    def start_attendance(self):
+        """Bắt đầu điểm danh"""
+        if not self.start_camera():
+            return
+        
+        self.is_attending = True
+        dpg.configure_item("start_att_btn", enabled=False)
+        dpg.configure_item("stop_att_btn", enabled=True)
+        dpg.set_value("attendance_status", "Trang thai: Dang diem danh...")
+        
+        print("📷 Bắt đầu điểm danh")
+    
+    def stop_attendance(self):
+        """Dừng điểm danh"""
+        self.is_attending = False
+        dpg.configure_item("start_att_btn", enabled=True)
+        dpg.configure_item("stop_att_btn", enabled=False)
+        dpg.set_value("attendance_status", "Trang thai: Da dung")
+        
+        print("⏹️ Đã dừng điểm danh")
+    
+    def update_info(self):
+        """Cập nhật thông tin hệ thống"""
+        students = self.db.get_all_students()
+        today = self.db.get_attendance_today()
+        
+        dpg.set_value("total_count", f"Tong sinh vien: {len(students)}")
+        dpg.set_value("today_count", f"Diem danh hom nay: {len(today)}")
+        
+        # Cập nhật bảng
+        self.update_table(students)
+    
+    def update_table(self, students):
+        """Cập nhật bảng sinh viên"""
+        # Xóa hàng cũ
+        if dpg.does_item_exist("student_table"):
+            children = dpg.get_item_children("student_table", slot=1)
             for child in children:
                 dpg.delete_item(child)
         
-        # Thêm các hàng mới
-        for i, record in enumerate(self.attendance_records):
-            with dpg.table_row(parent="attendance_table"):
-                dpg.add_text(str(i + 1))
-                dpg.add_text(record['name'])
-                dpg.add_text(record['time'])
-                dpg.add_text(f"{record['confidence']:.2f}")
+        # Thêm hàng mới
+        for student in students:
+            with dpg.table_row(parent="student_table"):
+                dpg.add_text(student['student_id'])
+                dpg.add_text(student['full_name'])
+                dpg.add_text(student['class_name'])
                 
-                # Màu sắc cho trạng thái xác thực
-                verification_color = [0, 255, 0] if record['verification'] == "XAC THUC" else [255, 100, 100]
-                dpg.add_text(record['verification'], color=verification_color)
-
-    def capture_photo(self):
-        """Chụp ảnh từ camera"""
-        if self.current_frame is not None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"capture_{timestamp}.jpg"
-            cv2.imwrite(filename, self.current_frame)
-            dpg.set_value("status_bar", f"Da chup anh: {filename}")
-
-    def clear_attendance(self):
-       """Xóa danh sách điểm danh"""
-       self.attendance_records.clear()
-       self.update_attendance_display()
-       dpg.set_value("total_count", "Tong so sinh vien da diem danh: 0")
-       dpg.set_value("status_bar", "Da xoa danh sach diem danh")
-       
-       # Reset các trạng thái hiện tại
-       dpg.set_value("current_student_name", "Ten sinh vien: ---")
-       dpg.set_value("current_confidence", "Do tin cay: ---")
-       dpg.set_value("current_verification", "Trang thai xac thuc: ---")
-
-    def export_report(self):
-        """Xuất báo cáo điểm danh"""
-        if not self.attendance_records:
-            dpg.set_value("status_bar", "Khong co du lieu de xuat bao cao")
-            return
-       
-        try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"attendance_report_{timestamp}.txt"
-            
-            # Tính thống kê
-            total_students = len(self.attendance_records)
-            verified_students = len([r for r in self.attendance_records if r['verification'] == "XAC THUC"])
-            unverified_students = total_students - verified_students
-            
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write("BAO CAO DIEM DANH TICH HOP CHONG GIAN LAN\n")
-                f.write("=" * 60 + "\n")
-                f.write(f"Ngay tao: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n")
-                f.write(f"He thong: Nhan dien khuon mat + Chong gia mao\n\n")
-                
-                f.write("THONG KE TONG HOP:\n")
-                f.write("-" * 30 + "\n")
-                f.write(f"Tong so sinh vien diem danh: {total_students}\n")
-                f.write(f"Sinh vien da xac thuc: {verified_students}\n")
-                f.write(f"Sinh vien chua xac thuc: {unverified_students}\n")
-                f.write(f"Ty le xac thuc: {(verified_students/total_students*100):.1f}%\n\n")
-                
-                f.write("CHI TIET DIEM DANH:\n")
-                f.write("-" * 80 + "\n")
-                f.write(f"{'STT':<5} {'Ten sinh vien':<20} {'Thoi gian':<12} {'Tin cay':<10} {'Xac thuc':<15}\n")
-                f.write("-" * 80 + "\n")
-                
-                for i, record in enumerate(self.attendance_records):
-                    f.write(f"{i+1:<5} {record['name']:<20} {record['time']:<12} "
-                            f"{record['confidence']:<10.2f} {record['verification']:<15}\n")
-                
-                f.write("\n" + "=" * 60 + "\n")
-                f.write("LUU Y:\n")
-                f.write("- XAC THUC: Sinh vien da vuot qua kiem tra chong gia mao\n")
-                f.write("- KHONG XAC THUC: Sinh vien chua vuot qua kiem tra chong gia mao\n")
-                f.write("- Do tin cay: Muc do tin cay cua mo hinh nhan dien (0.0 - 1.0)\n")
-            
-            dpg.set_value("status_bar", f"Da xuat bao cao: {filename}")
-            
-        except Exception as e:
-            dpg.set_value("status_bar", f"Loi khi xuat bao cao: {str(e)}")
-
+                # Trạng thái dữ liệu khuôn mặt
+                if student['embedding_path'] and os.path.exists(student['embedding_path']):
+                    dpg.add_text("Co", color=(0, 255, 0))
+                else:
+                    dpg.add_text("Chua co", color=(255, 255, 0))
+    
+    def show_message(self, message):
+        """Hiển thị thông báo"""
+        if dpg.does_item_exist("message_popup"):
+            dpg.delete_item("message_popup")
+        
+        with dpg.window(label="Thong bao", tag="message_popup", 
+                       width=300, height=120, modal=True):
+            dpg.add_text(message)
+            dpg.add_separator()
+            dpg.add_button(label="OK", callback=lambda: dpg.delete_item("message_popup"), 
+                          width=100)
+    
     def run(self):
         """Chạy ứng dụng"""
-        dpg.setup_dearpygui()
         dpg.show_viewport()
         
         try:
             while dpg.is_dearpygui_running():
                 dpg.render_dearpygui_frame()
-        finally:
-            self.cleanup()
-
+        except KeyboardInterrupt:
+            print("Ứng dụng đã được dừng")
+        
+        self.cleanup()
+    
     def cleanup(self):
         """Dọn dẹp tài nguyên"""
-        self.stop_camera()
+        print("Đang dọn dẹp tài nguyên...")
+        
+        self.is_camera_running = False
+        self.is_attending = False
+        self.is_recording = False
+        
+        if self.camera:
+            self.camera.release()
+        
+        if self.video_writer:
+            self.video_writer.release()
+        
+        # Xóa file tạm
+        temp_files = ["temp_student_video.avi"]
+        for file in temp_files:
+            if os.path.exists(file):
+                os.remove(file)
+        
         dpg.destroy_context()
+        print("✅ Dọn dẹp hoàn tất")
+
+
+# Mock classes khi không có model thật
+class MockFaceRecognition:
+    def __init__(self, *args, **kwargs):
+        print("⚠️ Sử dụng Mock Face Recognition")
+    
+    def process_frame(self, frame):
+        # Giả lập nhận diện được sinh viên SV001
+        return frame, [(100, 100, 150, 200, "SV001", 0.95)]
+    
+    def detect_faces(self, frame):
+        return [frame[100:300, 100:250]]
+    
+    def get_embedding(self, face):
+        return np.random.rand(128)
+
+class MockAntiSpoofing:
+    def __init__(self):
+        print("⚠️ Sử dụng Mock Anti-Spoofing")
+    
+    def check_liveness(self, face_image):
+        return True, 0.85
+
 
 def main():
-   """Hàm main"""
-   app = AttendanceGUI()
-   app.run()
+    """Chạy ứng dụng chính"""
+    try:
+        # Tạo thư mục cần thiết
+        os.makedirs("data", exist_ok=True)
+        os.makedirs("data/embeddings", exist_ok=True)
+        os.makedirs("models", exist_ok=True)
+        
+        print("🚀 Khởi động hệ thống điểm danh...")
+        
+        # Khởi tạo và chạy ứng dụng
+        app = AttendanceGUI()
+        app.run()
+        
+    except Exception as e:
+        print(f"❌ Lỗi chạy ứng dụng: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
-   main()
+    main()

@@ -93,254 +93,118 @@ def detect_and_crop_face(image, target_size=224, padding_percent=0.2):
     
     return face_image
 
-def calculate_frame_difference(frame1, frame2):
-    """
-    Tính toán sự khác biệt giữa hai frame
-    
-    Args:
-        frame1: Frame thứ nhất
-        frame2: Frame thứ hai
-        
-    Returns:
-        Điểm số khác biệt (càng cao càng khác biệt)
-    """
-    # Chuyển đổi sang grayscale
-    gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
-    gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
-    
-    # Resize để đảm bảo cùng kích thước
-    if gray1.shape != gray2.shape:
-        gray2 = cv2.resize(gray2, (gray1.shape[1], gray1.shape[0]))
-    
-    # Tính toán sự khác biệt sử dụng MSE (Mean Squared Error)
-    mse = np.mean((gray1.astype(np.float32) - gray2.astype(np.float32)) ** 2)
-    
-    # Tính toán histogram khoảng cách
-    hist1 = cv2.calcHist([gray1], [0], None, [256], [0, 256])
-    hist2 = cv2.calcHist([gray2], [0], None, [256], [0, 256])
-    
-    # Chuẩn hóa histogram
-    cv2.normalize(hist1, hist1, 0, 1, cv2.NORM_MINMAX)
-    cv2.normalize(hist2, hist2, 0, 1, cv2.NORM_MINMAX)
-    
-    # Tính khoảng cách histogram
-    hist_dist = cv2.compareHist(hist1, hist2, cv2.HISTCMP_BHATTACHARYYA)
-    
-    # Kết hợp các đo lường khác biệt
-    difference_score = 0.5 * mse + 0.5 * hist_dist * 1000
-    
-    return difference_score
 
-def segment_video(video_path, num_segments=12):
-    """
-    Phân đoạn video thành các đoạn có độ dài bằng nhau
-    
-    Args:
-        video_path: Đường dẫn tới file video
-        num_segments: Số lượng đoạn cần chia
-        
-    Returns:
-        Danh sách các đoạn (segment), mỗi đoạn là một khoảng frame [start, end]
-    """
-    # Đọc video
-    video = cv2.VideoCapture(video_path)
-    
-    # Lấy tổng số frame
-    total_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    # Giải phóng tài nguyên
-    video.release()
-    
-    # Tính kích thước của mỗi đoạn
-    segment_size = total_frames // num_segments
-    
-    # Tạo danh sách các đoạn
-    segments = []
-    for i in range(num_segments):
-        start_frame = i * segment_size
-        end_frame = min((i + 1) * segment_size - 1, total_frames - 1)
-        segments.append((start_frame, end_frame))
-    
-    return segments
 
-def extract_diverse_frames_from_video(video_path, output_folder, num_segments=12, frames_per_segment=8, target_size=224):
-    """
-    Trích xuất và cắt các khung hình đa dạng từ video
-    
-    Args:
-        video_path: Đường dẫn đến file video
-        output_folder: Thư mục đầu ra để lưu các frame
-        num_segments: Số lượng đoạn video được chia
-        frames_per_segment: Số frame trích xuất từ mỗi đoạn
-        target_size: Kích thước ảnh đầu ra (pixel)
-    
-    Returns:
-        Số lượng frame đã lưu thành công
-    """
-    # Đảm bảo thư mục đầu ra tồn tại
+def extract_diverse_frames_from_video(video_path, output_folder, target_frames=400, target_size=224):
+    """Trích xuất 150 ảnh khuôn mặt chất lượng cao nhất từ video"""
     ensure_dir(output_folder)
     
-    # Đọc video
-    video = cv2.VideoCapture(video_path)
+    # Khởi tạo MediaPipe Face Mesh để đánh giá chất lượng
+    import mediapipe as mp
+    mp_face_mesh = mp.solutions.face_mesh
+    face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, min_detection_confidence=0.5)
     
-    # Kiểm tra video đã mở thành công chưa
+    video = cv2.VideoCapture(video_path)
     if not video.isOpened():
-        print(f"Error: Không thể mở video {video_path}")
+        print(f"❌ Không thể mở video {video_path}")
         return 0
     
-    # Lấy thông tin video
     total_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = video.get(cv2.CAP_PROP_FPS)
-    duration = total_frames / fps
+    print(f"🎯 Mục tiêu: {target_frames} ảnh chất lượng cao từ {total_frames} frames")
     
-    print(f"Video info: {total_frames} frames, {fps} fps, {duration:.2f} seconds")
+    # Lấy mẫu frame cách đều từ video (lấy nhiều để chọn lọc)
+    sample_indices = np.linspace(0, total_frames-1, min(total_frames, target_frames*3), dtype=int)
     
-    # Phân đoạn video
-    segments = segment_video(video_path, num_segments)
+    face_candidates = []
     
-    # Tạo danh sách để lưu các frame đã trích xuất
-    saved_frames = []
+    print("🔍 Phân tích chất lượng khuôn mặt...")
+    for frame_idx in tqdm(sample_indices):
+        video.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = video.read()
+        if not ret:
+            continue
+            
+        # Phát hiện khuôn mặt
+        face_image = detect_and_crop_face(frame, target_size)
+        if face_image is None:
+            continue
+            
+        # Đánh giá chất lượng bằng MediaPipe
+        quality_score = evaluate_face_quality_mediapipe(face_image, face_mesh)
+        
+        face_candidates.append((frame_idx, face_image, quality_score))
     
-    # Duyệt qua từng đoạn để trích xuất frame
-    with tqdm(total=num_segments * frames_per_segment, desc=f"Extracting frames from {os.path.basename(video_path)}") as pbar:
-        for segment_idx, (start_frame, end_frame) in enumerate(segments):
-            # Lấy một số frame từ segment để tìm kiếm sự đa dạng
-            sample_frames = []
-            
-            # Xác định số lượng frame cần lấy mẫu (khoảng 3 lần số lượng frames_per_segment)
-            num_samples = min(frames_per_segment * 3, end_frame - start_frame + 1)
-            
-            # Lấy mẫu các frame cách đều nhau trong đoạn
-            sample_indices = np.linspace(start_frame, end_frame, num_samples, dtype=int)
-            
-            # Duyệt qua các frame mẫu để đọc và kiểm tra khuôn mặt
-            for frame_idx in sample_indices:
-                # Đặt vị trí đọc frame
-                video.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                
-                # Đọc frame
-                success, frame = video.read()
-                
-                # Kiểm tra đọc frame thành công
-                if not success:
-                    continue
-                
-                # Phát hiện và cắt khuôn mặt
-                face_image = detect_and_crop_face(frame, target_size=target_size)
-                
-                # Kiểm tra nếu phát hiện được khuôn mặt
-                if face_image is not None:
-                    sample_frames.append((frame_idx, face_image))
-            
-            # Nếu không có đủ frame với khuôn mặt, bỏ qua segment này
-            if len(sample_frames) < frames_per_segment:
-                for _ in range(len(sample_frames)):
-                    pbar.update(1)
-                continue
-            
-            # Thuật toán lựa chọn frame đa dạng
-            selected_frames = []
-            
-            # Chọn frame đầu tiên (có thể là frame giữa segment)
-            middle_idx = len(sample_frames) // 2
-            selected_frames.append(sample_frames[middle_idx])
-            
-            # Loại bỏ frame đã chọn khỏi danh sách mẫu
-            remaining_frames = sample_frames[:middle_idx] + sample_frames[middle_idx+1:]
-            
-            # Lựa chọn các frame còn lại dựa trên độ khác biệt
-            while len(selected_frames) < frames_per_segment and remaining_frames:
-                # Tính độ khác biệt của mỗi frame còn lại so với các frame đã chọn
-                max_diff_score = -1
-                max_diff_idx = -1
-                
-                for i, (frame_idx, frame) in enumerate(remaining_frames):
-                    # Tính tổng độ khác biệt với tất cả các frame đã chọn
-                    total_diff = sum(calculate_frame_difference(frame, selected_frame[1]) for selected_frame in selected_frames)
-                    
-                    # Lấy frame có tổng độ khác biệt lớn nhất
-                    if total_diff > max_diff_score:
-                        max_diff_score = total_diff
-                        max_diff_idx = i
-                
-                # Thêm frame có độ khác biệt lớn nhất vào danh sách đã chọn
-                if max_diff_idx >= 0:
-                    selected_frames.append(remaining_frames[max_diff_idx])
-                    remaining_frames.pop(max_diff_idx)
-                else:
-                    break
-            
-            # Lưu các frame đã chọn
-            for i, (frame_idx, face_image) in enumerate(selected_frames):
-                # Tạo tên file
-                filename = os.path.join(output_folder, f"segment_{segment_idx:02d}_frame_{i:02d}.jpg")
-                
-                # Lưu ảnh
-                cv2.imwrite(filename, face_image)
-                
-                # Thêm vào danh sách đã lưu
-                saved_frames.append((frame_idx, filename))
-                
-                # Cập nhật thanh tiến trình
-                pbar.update(1)
-    
-    # Giải phóng tài nguyên
     video.release()
+    face_mesh.close()
     
-    print(f"Successfully saved {len(saved_frames)} diverse face frames from {os.path.basename(video_path)}")
-    return len(saved_frames)
+    if not face_candidates:
+        print("❌ Không tìm thấy khuôn mặt nào!")
+        return 0
+    
+    # Sắp xếp theo chất lượng và lấy top 150
+    face_candidates.sort(key=lambda x: x[2], reverse=True)
+    selected_faces = face_candidates[:target_frames]
+    
+    print(f"💾 Lưu {len(selected_faces)} ảnh chất lượng cao nhất...")
+    for i, (frame_idx, face_image, quality) in enumerate(selected_faces):
+        filename = os.path.join(output_folder, f"face_{i:03d}_q{quality:.2f}.jpg")
+        cv2.imwrite(filename, face_image)
+    
+    print(f"✅ Đã lưu {len(selected_faces)} ảnh khuôn mặt chất lượng cao")
+    return len(selected_faces)
 
-def extract_faces_from_all_videos(video_folder, raw_folder, num_segments=12, frames_per_segment=8, target_size=224):
-    """
-    Xử lý tất cả các video trong thư mục, trích xuất khuôn mặt
+def evaluate_face_quality_mediapipe(face_image, face_mesh):
+    """Đánh giá chất lượng khuôn mặt bằng MediaPipe"""
+    # Chuyển RGB cho MediaPipe
+    rgb_image = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
+    results = face_mesh.process(rgb_image)
     
-    Args:
-        video_folder: Thư mục chứa các video
-        raw_folder: Thư mục đầu ra cho ảnh raw
-        num_segments: Số đoạn cần chia cho mỗi video
-        frames_per_segment: Số frame trích xuất từ mỗi đoạn
-        target_size: Kích thước ảnh đầu ra
-    """
-    # Đảm bảo thư mục raw tồn tại
+    # Điểm cơ bản từ độ sắc nét và sáng
+    gray = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
+    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+    brightness = np.mean(gray)
+    contrast = gray.std()
+    
+    # Điểm thưởng nếu phát hiện được face landmarks
+    landmark_bonus = 0
+    if results.multi_face_landmarks:
+        landmark_bonus = 0.5  # Có landmarks = tốt hơn
+    
+    # Điểm sáng tối ưu (128 = lý tưởng)
+    brightness_score = 1 - abs(brightness - 128) / 128
+    
+    # Tổng điểm
+    quality = sharpness/1000 + contrast/100 + brightness_score + landmark_bonus
+    return quality
+
+def extract_faces_from_all_videos(video_folder, raw_folder, target_frames=400, target_size=224):
+    """Xử lý tất cả video, trích xuất 150 ảnh chất lượng cao nhất"""
     ensure_dir(raw_folder)
-    
-    # Lấy danh sách video trong thư mục
     videos = [f for f in os.listdir(video_folder) if f.endswith(('.mp4', '.avi', '.mov'))]
+    
+    print(f"🎯 Tìm thấy {len(videos)} video, mỗi video sẽ tạo {target_frames} ảnh chất lượng cao")
     
     for video in videos:
         video_path = os.path.join(video_folder, video)
-        
-        # Lấy tên sinh viên từ tên video (bỏ đuôi file)
         student_id = os.path.splitext(video)[0]
-        
-        # Tạo thư mục cho sinh viên trong raw
         raw_student_folder = os.path.join(raw_folder, student_id)
         ensure_dir(raw_student_folder)
         
-        # Trích xuất frame đa dạng từ video
-        extract_diverse_frames_from_video(video_path, raw_student_folder, num_segments=num_segments, frames_per_segment=frames_per_segment, target_size=target_size)
+        print(f"\n📹 Xử lý: {video}")
+        num_extracted = extract_diverse_frames_from_video(video_path, raw_student_folder, target_frames, target_size)
+        print(f"✅ {student_id}: {num_extracted} ảnh")
     
-    print(f"Đã hoàn thành trích xuất ảnh từ video, lưu trong thư mục {raw_folder}")
+    print(f"\n🎉 Hoàn thành! Tạo ~{target_frames} ảnh chất lượng cao cho {len(videos)} sinh viên")
 
 if __name__ == "__main__":
-    # Đường dẫn đến các thư mục
-    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # KLTN/
+    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     video_folder = os.path.join(project_dir, "data", "videos")
     raw_folder = os.path.join(project_dir, "data", "raw")
     
-    # Cấu hình trích xuất
-    num_segments = 12
-    frames_per_segment = 8
-    target_size = 224
+    print("🎯 TRÍCH XUẤT 150 ẢNH CHẤT LƯỢNG CAO/VIDEO")
+    print("=" * 50)
     
-    # Tổng số frame
-    total_frames = num_segments * frames_per_segment
-    
-    print(f"Cấu hình trích xuất:")
-    print(f"- Chia mỗi video thành {num_segments} đoạn")
-    print(f"- Lấy {frames_per_segment} frame đa dạng từ mỗi đoạn")
-    print(f"- Tổng số frame tối đa sẽ trích xuất: {total_frames}")
-    print(f"- Kích thước ảnh đầu ra: {target_size}x{target_size} pixel")
-    
-    # Xử lý tất cả các video
-    extract_faces_from_all_videos(video_folder, raw_folder, num_segments=num_segments, frames_per_segment=frames_per_segment, target_size=target_size)
+    if not os.path.exists(video_folder):
+        print(f"❌ Không tìm thấy thư mục: {video_folder}")
+    else:
+        extract_faces_from_all_videos(video_folder, raw_folder, target_frames=400)

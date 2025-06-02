@@ -106,7 +106,7 @@ class FaceRecognition:
        cv2.destroyAllWindows()
 
 def main():
-   model_path = "models/model (4).tflite"
+   model_path = "models/model (11).tflite"
    class_indices_path = "models/class_indices.json"
    
    face_system = FaceRecognition(model_path, class_indices_path)
