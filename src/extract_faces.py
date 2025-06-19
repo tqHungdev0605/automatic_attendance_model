@@ -95,7 +95,7 @@ def detect_and_crop_face(image, target_size=224, padding_percent=0.2):
 
 
 
-def extract_diverse_frames_from_video(video_path, output_folder, target_frames=400, target_size=224):
+def extract_diverse_frames_from_video(video_path, output_folder, target_frames=300, target_size=224):
     """Trích xuất 150 ảnh khuôn mặt chất lượng cao nhất từ video"""
     ensure_dir(output_folder)
     
@@ -177,7 +177,7 @@ def evaluate_face_quality_mediapipe(face_image, face_mesh):
     quality = sharpness/1000 + contrast/100 + brightness_score + landmark_bonus
     return quality
 
-def extract_faces_from_all_videos(video_folder, raw_folder, target_frames=400, target_size=224):
+def extract_faces_from_all_videos(video_folder, raw_folder, target_frames=300, target_size=224):
     """Xử lý tất cả video, trích xuất 150 ảnh chất lượng cao nhất"""
     ensure_dir(raw_folder)
     videos = [f for f in os.listdir(video_folder) if f.endswith(('.mp4', '.avi', '.mov'))]
@@ -207,4 +207,4 @@ if __name__ == "__main__":
     if not os.path.exists(video_folder):
         print(f"❌ Không tìm thấy thư mục: {video_folder}")
     else:
-        extract_faces_from_all_videos(video_folder, raw_folder, target_frames=400)
+        extract_faces_from_all_videos(video_folder, raw_folder, target_frames=300)

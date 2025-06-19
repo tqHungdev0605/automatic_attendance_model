@@ -1,261 +1,255 @@
+# database.py - Simplified version
 import sqlite3
+import numpy as np
+import json
 import os
-import pickle
 from datetime import datetime
 
-class SimpleDatabase:
-    def __init__(self, db_path="data/students.db"):
+class FaceDatabase:
+    def __init__(self, db_path="face_attendance.db"):
         self.db_path = db_path
-        
-        # Tạo thư mục nếu chưa có
-        db_dir = os.path.dirname(db_path)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir)
-        
         self.create_tables()
     
-    def get_connection(self):
-        """Tạo kết nối database"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-    
     def create_tables(self):
-        """Tạo bảng cần thiết"""
-        conn = self.get_connection()
+        conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        # Bảng sinh viên
+        # Bảng lưu thông tin sinh viên (đã loại bỏ class_id)
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS students (
-                student_id TEXT PRIMARY KEY,
-                full_name TEXT NOT NULL,
-                class_name TEXT NOT NULL,
-                embedding_path TEXT,
-                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
+        CREATE TABLE IF NOT EXISTS students (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            embedding TEXT NOT NULL,
+            photo_path TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
         ''')
         
-        # Bảng điểm danh
+        # Bảng lưu thông tin điểm danh (đã đơn giản hóa)
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS attendance (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                student_id TEXT,
-                student_name TEXT,
-                attendance_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                confidence REAL,
-                FOREIGN KEY (student_id) REFERENCES students (student_id)
-            )
+        CREATE TABLE IF NOT EXISTS attendance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id TEXT NOT NULL,
+            date DATE NOT NULL,
+            time TIME NOT NULL,
+            status TEXT DEFAULT 'present',
+            similarity REAL,
+            FOREIGN KEY (student_id) REFERENCES students(id),
+            UNIQUE(student_id, date)
+        )
         ''')
         
         conn.commit()
         conn.close()
     
-    # ========== QUẢN LÝ SINH VIÊN ==========
-    def add_student(self, student_id, full_name, class_name, embedding_path=None):
-        """Thêm sinh viên mới"""
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                INSERT INTO students (student_id, full_name, class_name, embedding_path)
-                VALUES (?, ?, ?, ?)
-            ''', (student_id, full_name, class_name, embedding_path))
-            
-            conn.commit()
-            conn.close()
-            print(f"Thêm sinh viên {student_id} - {full_name} thành công!")
-            return True
-            
-        except sqlite3.IntegrityError:
-            conn.close()
-            print(f"Lỗi: Sinh viên {student_id} đã tồn tại!")
-            return False
-        except Exception as e:
-            conn.close()
-            print(f"Lỗi thêm sinh viên: {e}")
-            return False
+    def embedding_to_db(self, embedding):
+        """Chuyển đổi embedding numpy array thành chuỗi để lưu vào DB"""
+        return json.dumps(embedding.tolist())
     
-    def delete_student(self, student_id):
-        """Xóa sinh viên"""
-        try:
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            
-            # Lấy thông tin sinh viên trước khi xóa
-            cursor.execute('SELECT * FROM students WHERE student_id = ?', (student_id,))
-            student = cursor.fetchone()
-            
-            if not student:
-                conn.close()
-                print(f"Không tìm thấy sinh viên {student_id}")
-                return False
-            
-            # Xóa file embedding nếu có
-            if student['embedding_path'] and os.path.exists(student['embedding_path']):
-                os.remove(student['embedding_path'])
-                print(f"Đã xóa file embedding: {student['embedding_path']}")
-            
-            # Xóa bản ghi điểm danh
-            cursor.execute('DELETE FROM attendance WHERE student_id = ?', (student_id,))
-            
-            # Xóa sinh viên
-            cursor.execute('DELETE FROM students WHERE student_id = ?', (student_id,))
-            
-            conn.commit()
-            conn.close()
-            print(f"Đã xóa sinh viên {student_id} - {student['full_name']}")
-            return True
-            
-        except Exception as e:
-            conn.close()
-            print(f"Lỗi xóa sinh viên: {e}")
-            return False
+    def embedding_from_db(self, embedding_str):
+        """Chuyển đổi chuỗi từ DB thành numpy array"""
+        return np.array(json.loads(embedding_str))
     
-    def get_student(self, student_id):
-        """Lấy thông tin sinh viên"""
-        conn = self.get_connection()
+    def add_student(self, student_id, name, embedding, photo_path=None):
+        """Thêm sinh viên mới vào cơ sở dữ liệu"""
+        conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        cursor.execute('SELECT * FROM students WHERE student_id = ?', (student_id,))
-        student = cursor.fetchone()
+        embedding_str = self.embedding_to_db(embedding)
+        
+        try:
+            cursor.execute(
+                "INSERT INTO students (id, name, embedding, photo_path) VALUES (?, ?, ?, ?)",
+                (student_id, name, embedding_str, photo_path)
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            # Sinh viên đã tồn tại
+            return False
+        finally:
+            conn.close()
+    
+    def update_student(self, student_id, name=None, embedding=None, photo_path=None):
+        """Cập nhật thông tin sinh viên"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Lấy thông tin hiện tại của sinh viên
+        cursor.execute("SELECT name, embedding, photo_path FROM students WHERE id=?", (student_id,))
+        result = cursor.fetchone()
+        
+        if not result:
+            conn.close()
+            return False  # Sinh viên không tồn tại
+        
+        current_name, current_embedding, current_photo_path = result
+        
+        # Cập nhật các trường nếu được cung cấp
+        new_name = name if name is not None else current_name
+        new_embedding_str = self.embedding_to_db(embedding) if embedding is not None else current_embedding
+        new_photo_path = photo_path if photo_path is not None else current_photo_path
+        
+        cursor.execute(
+            "UPDATE students SET name=?, embedding=?, photo_path=? WHERE id=?",
+            (new_name, new_embedding_str, new_photo_path, student_id)
+        )
+        
+        conn.commit()
+        conn.close()
+        return True
+    
+    def delete_student(self, student_id):
+        """Xóa sinh viên khỏi cơ sở dữ liệu"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("DELETE FROM students WHERE id=?", (student_id,))
+        affected_rows = cursor.rowcount
+        
+        conn.commit()
         conn.close()
         
-        if student:
-            return dict(student)
+        return affected_rows > 0
+    
+    def get_student(self, student_id):
+        """Lấy thông tin sinh viên theo ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT id, name, embedding, photo_path FROM students WHERE id=?", (student_id,))
+        result = cursor.fetchone()
+        
+        conn.close()
+        
+        if result:
+            id, name, embedding_str, photo_path = result
+            return {
+                'id': id,
+                'name': name,
+                'embedding': embedding_str,
+                'photo_path': photo_path
+            }
         return None
     
     def get_all_students(self):
-        """Lấy tất cả sinh viên"""
-        conn = self.get_connection()
+        """Lấy danh sách tất cả sinh viên"""
+        conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        cursor.execute('SELECT * FROM students ORDER BY full_name')
-        students = [dict(row) for row in cursor.fetchall()]
+        cursor.execute("SELECT id, name, embedding, photo_path FROM students")
+        results = cursor.fetchall()
         conn.close()
+        
+        students = []
+        for result in results:
+            id, name, embedding_str, photo_path = result
+            students.append({
+                'id': id,
+                'name': name,
+                'embedding': embedding_str,
+                'photo_path': photo_path
+            })
+        
         return students
     
-    def update_student_embedding(self, student_id, embedding_path):
-        """Cập nhật embedding cho sinh viên"""
-        conn = self.get_connection()
+    def mark_attendance(self, student_id, similarity=None, status="present", date=None):
+        """Đánh dấu sinh viên có mặt - CHỈ THÊM MỚI, KHÔNG GHI ĐÈ"""
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
+        
+        time = datetime.now().strftime("%H:%M:%S")
+        
+        conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        cursor.execute('''
-            UPDATE students 
-            SET embedding_path = ?
-            WHERE student_id = ?
-        ''', (embedding_path, student_id))
-        
-        success = cursor.rowcount > 0
-        conn.commit()
-        conn.close()
-        
-        if success:
-            print(f"Cập nhật embedding cho {student_id} thành công!")
-        return success
-    
-    # ========== ĐIỂM DANH ==========
-    def mark_attendance(self, student_id, confidence=None):
-        """Ghi nhận điểm danh"""
         try:
-            # Lấy thông tin sinh viên
-            student = self.get_student(student_id)
-            if not student:
-                print(f"Không tìm thấy sinh viên {student_id}")
+            # Kiểm tra xem sinh viên đã điểm danh hôm nay chưa
+            cursor.execute(
+                "SELECT id FROM attendance WHERE student_id = ? AND date = ?",
+                (student_id, date)
+            )
+            existing = cursor.fetchone()
+            
+            if existing:
+                # Sinh viên đã điểm danh rồi, không thêm nữa
+                conn.close()
                 return False
             
-            conn = self.get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                INSERT INTO attendance (student_id, student_name, confidence)
-                VALUES (?, ?, ?)
-            ''', (student_id, student['full_name'], confidence))
-            
+            # Thêm bản ghi điểm danh mới
+            cursor.execute(
+                "INSERT INTO attendance (student_id, date, time, status, similarity) VALUES (?, ?, ?, ?, ?)",
+                (student_id, date, time, status, similarity)
+            )
             conn.commit()
-            conn.close()
-            
-            print(f"Điểm danh thành công: {student['full_name']} (ID: {student_id})")
-            if confidence:
-                print(f"Độ tin cậy: {confidence:.2f}")
-            
             return True
-            
         except Exception as e:
-            print(f"Lỗi ghi điểm danh: {e}")
+            print(f"Error marking attendance: {e}")
             return False
+        finally:
+            conn.close()
     
-    def get_attendance_today(self):
-        """Lấy danh sách điểm danh hôm nay"""
-        conn = self.get_connection()
+    def get_attendance(self, date=None):
+        """Lấy danh sách điểm danh theo ngày"""
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
+        
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row  # Để kết quả trả về dưới dạng dictionary
         cursor = conn.cursor()
         
-        today = datetime.now().date()
-        cursor.execute('''
-            SELECT * FROM attendance 
-            WHERE DATE(attendance_time) = ?
-            ORDER BY attendance_time DESC
-        ''', (today,))
+        cursor.execute("""
+            SELECT a.id, a.student_id, s.name, a.date, a.time, a.status, a.similarity
+            FROM attendance a
+            JOIN students s ON a.student_id = s.id
+            WHERE a.date = ?
+            ORDER BY a.time
+        """, (date,))
         
-        attendance_list = [dict(row) for row in cursor.fetchall()]
+        results = cursor.fetchall()
+        
+        attendance_records = []
+        for row in results:
+            attendance_records.append(dict(row))
+        
         conn.close()
-        return attendance_list
+        return attendance_records
     
-    def get_attendance_history(self, student_id=None, limit=50):
-        """Lấy lịch sử điểm danh"""
-        conn = self.get_connection()
+    def get_all_attendance(self):
+        """Lấy tất cả dữ liệu điểm danh"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
-        if student_id:
-            cursor.execute('''
-                SELECT * FROM attendance 
-                WHERE student_id = ?
-                ORDER BY attendance_time DESC
-                LIMIT ?
-            ''', (student_id, limit))
-        else:
-            cursor.execute('''
-                SELECT * FROM attendance 
-                ORDER BY attendance_time DESC
-                LIMIT ?
-            ''', (limit,))
+        cursor.execute("""
+            SELECT a.id, a.student_id, s.name, a.date, a.time, a.status, a.similarity
+            FROM attendance a
+            JOIN students s ON a.student_id = s.id
+            ORDER BY a.date DESC, a.time DESC
+        """)
         
-        history = [dict(row) for row in cursor.fetchall()]
+        results = cursor.fetchall()
+        
+        attendance_records = []
+        for row in results:
+            attendance_records.append(dict(row))
+        
         conn.close()
-        return history
-
-
-# Test đơn giản
-def test_database():
-    print("=== TEST DATABASE ===")
+        return attendance_records
     
-    db = SimpleDatabase("data/test_students.db")
-    
-    # Test thêm sinh viên
-    db.add_student("SV001", "Nguyen Van A", "CNTT01")
-    db.add_student("SV002", "Tran Thi B", "CNTT01")
-    
-    # Test lấy danh sách
-    students = db.get_all_students()
-    print(f"Có {len(students)} sinh viên:")
-    for s in students:
-        print(f"- {s['student_id']}: {s['full_name']} - {s['class_name']}")
-    
-    # Test điểm danh
-    db.mark_attendance("SV001", 0.95)
-    db.mark_attendance("SV002", 0.87)
-    
-    # Test lấy điểm danh hôm nay
-    today_attendance = db.get_attendance_today()
-    print(f"\nĐiểm danh hôm nay ({len(today_attendance)} người):")
-    for a in today_attendance:
-        print(f"- {a['student_name']} ({a['student_id']}) - {a['attendance_time']}")
-    
-    # Test xóa sinh viên
-    db.delete_student("SV002")
-    
-    print("\nTest hoàn thành!")
-
-if __name__ == "__main__":
-    test_database()
+    def is_student_attended_today(self, student_id, date=None):
+        """Kiểm tra sinh viên đã điểm danh hôm nay chưa"""
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "SELECT id FROM attendance WHERE student_id = ? AND date = ?",
+            (student_id, date)
+        )
+        result = cursor.fetchone()
+        conn.close()
+        
+        return result is not None
